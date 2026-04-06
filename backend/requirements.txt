@@ -1,0 +1,39 @@
+# Core ML/AI
+numpy==1.26.4
+pandas==2.2.3
+scikit-learn==1.6.1
+xgboost==2.1.4
+torch==2.3.0
+#pytorch-lightning==2.4.0
+shap==0.47.1
+optuna==4.2.1
+imbalanced-learn==0.13.0
+joblib==1.4.2
+
+# Flask + CORS for API
+Flask==3.1.0
+flask-cors==5.0.1
+Werkzeug==3.1.3
+gunicorn==21.2.0
+psycopg2-binary==2.9.10
+SQLAlchemy==2.0.38
+
+# Data processing
+openpyxl==3.1.5
+PyYAML==6.0.2
+xlrd==2.0.1
+#matplotlib==3.10.0
+#seaborn==0.13.2
+
+# JSON & Logging
+python-json-logger==3.2.1
+jsonschema==4.23.0
+requests==2.32.3
+
+# Utility
+tqdm==4.67.1
+scipy==1.15.1
+typing_extensions==4.13.2
+#setuptools==76.1.0
+#wheel==0.44.0
+

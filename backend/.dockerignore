@@ -1,0 +1,20 @@
+# Ignore everything except the listed files
+**
+
+!app.py
+!data_processing.py
+!extract_dashboard.py
+!MLP.py
+!model_cleanup.py
+!train.py
+!requirements.txt
+!UW_Churn_Pred_Data.xls
+!compute_feature_importances_MLP.py
+
+!db/
+!db/churn_database.sql
+
+!.env
+!wait-for-postgres.sh
+
+

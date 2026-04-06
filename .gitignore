@@ -1,0 +1,101 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Node
+node_modules/
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+
+# React Native
+.expo/
+dist/
+web-build/
+
+# iOS
+ios/Pods/
+ios/build/
+ios/Podfile.lock
+*.xcworkspace
+*.xcuserstate
+*.xcuserdatad
+*.moved-aside
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+xcuserdata
+*.xccheckout
+*.moved-aside
+DerivedData
+*.hmap
+*.ipa
+*.xcuserstate
+.DS_Store
+
+# Android
+android/app/build/
+android/build/
+android/gradle/
+android/gradlew
+android/gradlew.bat
+android/.gradle
+android/local.properties
+android/.idea
+android/*.iml
+android/app/release/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+!.env.template
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Logs
+logs
+*.log
+
+# Testing
+coverage/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Ignore model outputs and metrics
+model_metrics.json
+*.pkl
+*.csv
+
+# ML Model Training Artifacts
+MLP_churn*
+MLP_importance*
+MLP_metrics*
+MLP_training_*
+tracked_features*
+trained_features*
+XGB_training_*
+
+# Local-only career/resume notes
+docs/RESUME.md
+docs/RESUME.local.md
+
+
