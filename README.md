@@ -16,121 +16,140 @@ Core outcomes:
 - Batch churn scoring from uploaded datasets
 - Dynamic risk-threshold tuning for business review
 - Visual analytics for churn trends and feature importance
-- API-first architecture ready for hosted deployment
+# Nuu Mobile — Churn Prediction & Analytics (class project)
 
-## Architecture
+An end-to-end churn prediction platform built as a class project for Nuu Mobile. This repo contains a React dashboard and a Flask backend that together support CSV upload → data ingestion → feature processing → model training → batch prediction → analytics dashboards.
 
-```text
-React (Vite) UI  --->  Flask API  --->  PostgreSQL
-                         |
-                         +--> XGBoost / MLP training + inference
-```
+Why this README update
+-----------------------
+This README reflects recent code hardening and feature work:
 
-## Repository structure
+- CSV ingestion normalization (robust header normalization and "unnamed" column dropping)
+- Safe DB upserts and quoted identifiers (prevents SQL syntax failures on messy uploads)
+- Alias support for common typos (for example `App Uage (s)` → `app_usage_seconds`)
+- Improved training UX (progress JSON tokens and clearer frontend error reporting)
+- Frontend resiliency for charting (tolerant month parsing and friendly empty states)
 
-```text
-backend/      Flask app, model training/inference, DB integration
-frontend/     React/Vite dashboard and prediction UI
-docker-compose.yml
-```
+These updates make the platform more resilient to messy, real-world uploads and easier to demo.
 
-## Security-first setup
+Project summary
+---------------
+End-to-end churn analytics platform (React + Vite frontend, Flask backend, PostgreSQL) with production-style ingestion, model training (MLP / XGBoost / CatBoost / TabNet variants), batch prediction, and interactive dashboards for retention decisions.
 
-This repo is prepared for public sharing:
+Key features
+------------
+- Upload CSVs to run batch scoring and populate analytics dashboards
+- Automated preprocessing and feature pipelines (sklearn / pandas / custom transforms)
+- Multiple model types supported: PyTorch MLP, XGBoost/CatBoost pipelines; TabNet scaffolding available
+- Robust ingestion: header normalization, alias mapping, dropping malformed columns
+- Training orchestration: background training, progress tokens, and production-safe artifacts
+- Predictions API with batch import, persistence, and dashboard integration
+- Frontend charts (Chart.js) with graceful fallbacks and friendly messaging
 
-- Real secrets should **never** be committed.
-- Use `.env.example` and `frontend/.env.example` as templates.
-- Keep actual values only in local `.env` files or cloud host environment settings.
+Tech stack
+----------
+- Frontend: React, Vite, Chart.js, react-bootstrap
+- Backend: Python, Flask, pandas, scikit-learn, PyTorch (MLP), XGBoost/CatBoost
+- Database: PostgreSQL (psycopg2)
+- Dev / Deployment: Docker (optional), Vercel (frontend), Railway / Render / Cloud Run (backend)
 
-Before publishing, follow `SECURITY_CHECKLIST.md`.
+Repository layout
+-----------------
+- `backend/` — Flask app, training scripts, ingestion & DB code (entry: `backend/app.py`)
+- `frontend/` — React dashboard application
+- `docs/` — deployment and resume material
+- `models/` — trained model artifacts and metadata
 
-## Local development
+Running locally (quick)
+-----------------------
+These are minimal steps for a local demo (zsh):
 
-### Prerequisites
-
-- Python 3.10+
-- Node.js 18+
-- PostgreSQL (local or managed)
-- Optional: Docker Desktop (for container workflow)
-
-### 1) Configure environment files
-
-```bash
-cp .env.example .env
-cp frontend/.env.example frontend/.env
-```
-
-Then update values in `.env` and `frontend/.env`.
-
-### 2) Backend setup (venv)
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install -r backend/requirements.txt
-pip install gunicorn
-```
-
-Run backend:
+1) Backend (venv)
 
 ```bash
 cd backend
-gunicorn -w 2 -b 0.0.0.0:5000 app:app
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+# run the Flask app for local testing
+flask run --host=0.0.0.0 --port=5000
 ```
 
-Health endpoint:
+Health check:
 
 ```bash
 curl http://127.0.0.1:5000/health
 ```
 
-### 3) Frontend setup
+2) Frontend (dev)
 
 ```bash
 cd frontend
 npm install
 npm run dev
+# open http://localhost:5173
 ```
 
-Open `http://localhost:5173`.
-
-## Docker workflow (optional)
-
-If Docker is available:
+3) Optional: run with Docker Compose
 
 ```bash
 docker compose up --build
 ```
 
-Services:
+Important endpoints
+-------------------
+- `POST /upload` — upload CSVs for ingestion
+- `GET /dashboard_data` — aggregated counts used by dashboard charts
+- `POST /train` — start model training; progress tracked via JSON token files
+- `POST /predict_batch` — insert a batch of records to score
 
-- Frontend: `http://localhost:4173`
-- Backend: `http://localhost:5050`
-- DB: `localhost:5432`
+Recent updates and why they matter
+---------------------------------
+A few recent changes worth calling out:
 
-## Deployment recommendation (free/low-cost)
+- Real-world CSVs are messy. Header normalization and dropping `Unnamed:*` garbage columns prevents runtime SQL errors caused by invalid identifiers.
+- SQL identifiers are now quoted securely and upserts are generated to tolerate schema drift so ingestion can accept extra optional columns without breaking.
+- Training progress is surfaced via JSON tokens and the frontend now shows backend errors promptly instead of timing out silently.
+- Simple alias mapping handles common typos (for example `App Uage (s)` → `app_usage_seconds`), so the dashboard populates without manual CSV fixes.
 
-- **Frontend**: Vercel
-- **Backend**: Render / Railway / Fly.io
-- **Database**: Neon / Supabase / Railway Postgres
+Overview
+--------
+This project provides a complete pipeline for churn analytics: data ingestion from CSVs, automated preprocessing and feature extraction, model training, batch prediction, and interactive dashboards. The design emphasizes resiliency at the ingestion boundary and clear separation of responsibilities between frontend and backend.
 
-Set all runtime secrets via host environment variable UI.
+Suggested demo script (3–5 minutes)
+----------------------------------
+1. Show the dashboard UI and explain charts (activation counts, age-range, app-usage, feature importance).
+2. Upload `UW_Churn_Pred_Data_Full.csv` (or the provided sample) and show how ingestion populates dashboard counts.
+3. Start a training run from the UI; open the backend logs or show the training progress displayed by the frontend.
+4. Run a batch prediction and show persisted predictions and where they are visible in the dashboard.
 
-Detailed guide: `docs/DEPLOYMENT.md`
+Artifacts
+---------
+- Model metrics (stored under `models/` or `backend/` as JSON; e.g., `MLP_metrics.json`)
+- Feature importances (`MLP_importance.json`, `trained_features.json`)
+- Example checks to add: smoke tests for ingestion and training (pytest)
 
-## Resume-ready highlights
+Future improvements
+-------------------
+- Add a schema validation endpoint and a frontend pre-upload validator to give users immediate feedback about required columns.
+- Add automated tests (pytest) for ingestion, model training, and the predictions API.
+- Add CI/CD to test and deploy the backend automatically and run smoke checks against a staging DB.
+- Replace file-based training tokens with a small job queue (Redis / Cloud Tasks / Celery) for scale.
 
-Suggested bullets:
+Notes for non-technical reviewers
+--------------------------------
+- Built as a class project for Nuu Mobile to demonstrate the full data → insight lifecycle.
+- Highlights practical engineering: production-minded ingestion, DB resilience, model lifecycle handling, and attention to UX (clear errors and graceful charting).
 
-- Built an end-to-end churn prediction platform (React, Flask, PostgreSQL, XGBoost/MLP) with upload-to-inference workflows.
-- Implemented dynamic thresholding and analytics dashboards to support retention decision-making.
-- Productionized deployment using containerized services and environment-driven configuration.
+Contact / next steps
+--------------------
+A short demo recording (2–4 minutes) can be prepared on request to show: upload → train → predict → dashboard updates.
 
-More resume content (project summary, interview pitch, and skill tags): `docs/RESUME.md`
+See also
+--------
+- `docs/DEPLOYMENT.md` — deployment options and recommended steps
+- `docs/RESUME.md` — suggested resume bullets and talking points
+- `SECURITY_CHECKLIST.md` — steps to prepare repository for public release
 
-## Notes
-
-- Do not commit private datasets or production credentials.
-- If secrets were previously committed, rotate them and clean Git history before public release.
-- See `SECURITY_CHECKLIST.md` for the exact release process.
+---
+*Last updated: April 7, 2026 — README revised to reflect ingestion hardening, alias mapping, training UX improvements, and frontend resiliency.*
