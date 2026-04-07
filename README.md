@@ -16,9 +16,9 @@ Core outcomes:
 - Batch churn scoring from uploaded datasets
 - Dynamic risk-threshold tuning for business review
 - Visual analytics for churn trends and feature importance
-# Nuu Mobile — Churn Prediction & Analytics (class project)
+# Nuu Mobile — Churn Prediction & Analytics
 
-An end-to-end churn prediction platform built as a class project for Nuu Mobile. This repo contains a React dashboard and a Flask backend that together support CSV upload → data ingestion → feature processing → model training → batch prediction → analytics dashboards.
+An end-to-end churn prediction platform built for Nuu Mobile. This repo contains a React dashboard and a Flask backend that together support CSV upload → data ingestion → feature processing → model training → batch prediction → analytics dashboards.
 
 Why this README update
 -----------------------
@@ -138,7 +138,7 @@ Future improvements
 
 Notes for non-technical reviewers
 --------------------------------
-- Built as a class project for Nuu Mobile to demonstrate the full data → insight lifecycle.
+- Built for Nuu Mobile to demonstrate the full data → insight lifecycle.
 - Highlights practical engineering: production-minded ingestion, DB resilience, model lifecycle handling, and attention to UX (clear errors and graceful charting).
 
 Contact / next steps
