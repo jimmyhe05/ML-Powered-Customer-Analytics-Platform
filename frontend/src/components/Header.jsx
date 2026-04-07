@@ -1,6 +1,6 @@
-import React, { useState } from "react";
+import { useState } from "react";
 import { Navbar, Nav, Container } from "react-bootstrap";
-import { useLocation } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import logo from "../assets/nuu-logo.svg";
 
 const Header = () => {
@@ -50,7 +50,7 @@ const Header = () => {
       className="shadow-sm"
     >
       <Container fluid>
-        <Navbar.Brand href="/" className="d-flex align-items-center">
+  <Navbar.Brand as={Link} to="/" className="d-flex align-items-center">
           <img
             src={logo}
             style={{
@@ -76,22 +76,24 @@ const Header = () => {
         <Navbar.Collapse>
           <Nav className="ms-auto">
             <Nav.Link
-              href="/Training-for-engineers"
+              as={Link}
+              to="/training-for-engineers"
               style={
-                location.pathname === "/Training-for-engineers"
+                location.pathname === "/training-for-engineers"
                   ? activeLinkStyle
                   : linkStyle
               }
               onMouseEnter={handleHover}
               onMouseLeave={handleLeave}
               className={
-                location.pathname === "/Training-for-engineers" ? "active" : ""
+                location.pathname === "/training-for-engineers" ? "active" : ""
               }
             >
               Training For Engineers
             </Nav.Link>
             <Nav.Link
-              href="/"
+              as={Link}
+              to="/"
               style={location.pathname === "/" ? activeLinkStyle : linkStyle}
               onMouseEnter={handleHover}
               onMouseLeave={handleLeave}

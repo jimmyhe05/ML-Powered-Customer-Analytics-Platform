@@ -181,6 +181,7 @@ export default function Dashboard() {
         setReturnData(null);
         setUsageData(null);
         setCorrelationData([]);  // if you want to clear heatmap too
+  setPage(0);
 
         setLoading(true);
         // Optionally re-fetch empty dashboard to refresh view
@@ -722,7 +723,21 @@ export default function Dashboard() {
     scrollToDashboardTitle();
   };
 
-  const pages = dashboardData
+  const hasDashboardContent = Boolean(
+    dashboardData && (
+      (dashboardData.total_users ?? 0) > 0 ||
+      (dashboardData.churn_counts_per_month?.length ?? 0) > 0 ||
+      (dashboardData.age_range_counts?.length ?? 0) > 0 ||
+      (dashboardData.activation_counts?.length ?? 0) > 0 ||
+      (dashboardData.app_usage_percentages?.length ?? 0) > 0 ||
+      (carrierData?.length ?? 0) > 0 ||
+      (returnData?.source_distribution?.length ?? 0) > 0 ||
+      (usageData?.length ?? 0) > 0 ||
+      (correlationData?.length ?? 0) > 0
+    )
+  );
+
+  const pages = hasDashboardContent
     ? [
       {
         content: (

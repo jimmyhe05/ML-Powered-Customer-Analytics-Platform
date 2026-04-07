@@ -36,9 +36,7 @@ export default function TrainingForEngineers() {
   const [modelAccuracy, setModelAccuracy] = useState(null);
   const [mlpAccuracy, setMlpAccuracy] = useState(null);
   const [dragging, setDragging] = useState(false);
-  const [estimatedTimeRemaining, setEstimatedTimeRemaining] = useState(null);
   const [currentTrainingStage, setCurrentTrainingStage] = useState("");
-  const trainingStartTimeRef = useRef(null);
   const progressIntervalRef = useRef(null);
   const [error, setError] = useState(null);
   const [errorDetails, setErrorDetails] = useState(null);
@@ -49,6 +47,7 @@ export default function TrainingForEngineers() {
   // });
   const [currentStep, setCurrentStep] = useState(0);
   const [trainingMode, setTrainingMode] = useState("incremental");
+  const [speedMode, setSpeedMode] = useState("fast");
   const [forceScratchTraining, setForceScratchTraining] = useState(false);
   const [serverStatus, setServerStatus] = useState({
     checked: false,
@@ -89,6 +88,91 @@ export default function TrainingForEngineers() {
     };
 
     checkServerHealth();
+  }, []);
+
+  const syncTrainingStateFromBackend = async () => {
+    if (!BASE_URL) return;
+
+    try {
+      const [xgbStatusRes, xgbProgressRes, mlpStatusRes, mlpProgressRes] = await Promise.all([
+        fetch(`${BASE_URL}/training_status_XGB`),
+        fetch(`${BASE_URL}/training_progress_XGB`),
+        fetch(`${BASE_URL}/training_status_MLP`),
+        fetch(`${BASE_URL}/training_progress_MLP`),
+      ]);
+
+      const [xgbStatusData, xgbProgressData, mlpStatusData, mlpProgressData] = await Promise.all([
+        xgbStatusRes.json(),
+        xgbProgressRes.json(),
+        mlpStatusRes.json(),
+        mlpProgressRes.json(),
+      ]);
+
+      const xgbStatus = xgbStatusData?.status || "not_started";
+      const mlpStatus = mlpStatusData?.status || "not_started";
+
+      if (typeof xgbProgressData?.current_trial === "number") {
+        const totalTrials = xgbProgressData.total_trials || 0;
+        const progress = totalTrials > 0
+          ? Math.floor((xgbProgressData.current_trial / totalTrials) * 100)
+          : 0;
+        setXgbProgress(progress);
+      }
+
+      if (typeof mlpProgressData?.current_epoch === "number") {
+        const totalEpochs = mlpProgressData.total_epochs || 0;
+        const progress = totalEpochs > 0
+          ? Math.floor((mlpProgressData.current_epoch / totalEpochs) * 100)
+          : 0;
+        setMlpProgress(progress);
+      }
+
+      if (xgbStatus === "completed" && xgbStatusData?.metrics) {
+        setModelAccuracy(xgbStatusData.metrics);
+      }
+      if (mlpStatus === "completed" && mlpStatusData?.metrics) {
+        setMlpAccuracy(mlpStatusData.metrics);
+      }
+
+      if (xgbStatus === "error" || mlpStatus === "error") {
+        setIsTraining(false);
+        setError("Training encountered an error.");
+        setErrorDetails(xgbStatusData?.message || mlpStatusData?.message || null);
+        setXGBTrainingStatus(xgbStatus === "error" ? "error" : xgbStatus);
+        setMlpTrainingStatus(mlpStatus === "error" ? "error" : mlpStatus);
+        return;
+      }
+
+      const anyInProgress = xgbStatus === "in_progress" || mlpStatus === "in_progress";
+      const bothCompleted = xgbStatus === "completed" && mlpStatus === "completed";
+
+      if (anyInProgress) {
+        setIsTraining(true);
+        setCurrentStep(1);
+        setCurrentTrainingStage("Training in Progress...");
+      }
+
+      if (bothCompleted) {
+        setIsTraining(false);
+        setCurrentStep(2);
+        setXGBTrainingStatus("completed");
+        setMlpTrainingStatus("completed");
+      } else {
+        setXGBTrainingStatus(xgbStatus === "not_started" ? "idle" : xgbStatus);
+        setMlpTrainingStatus(mlpStatus === "not_started" ? "idle" : mlpStatus);
+      }
+    } catch (err) {
+      console.error("Failed to sync training state from backend:", err);
+    }
+  };
+
+  useEffect(() => {
+    if (!BASE_URL) return;
+
+    syncTrainingStateFromBackend();
+    const intervalId = setInterval(syncTrainingStateFromBackend, 2500);
+
+    return () => clearInterval(intervalId);
   }, []);
 
   const handleDrop = (event) => {
@@ -305,7 +389,6 @@ export default function TrainingForEngineers() {
           if (data.status === "completed" && mlpStartDetected) {
             setMlpProgress(100);
             setMlpAccuracy(data.metrics);
-            setEstimatedTimeRemaining(null);
             setMlpTrainingStatus(data.status);
             return;
           } else if (data.status === "error") {
@@ -391,23 +474,10 @@ export default function TrainingForEngineers() {
       });
     };
 
-    const fetchRowCount = async () => {
-      const res = await fetch(`${BASE_URL}/count_devices`);
-      const data = await res.json();
-      return data.row_count;
-    };
-
-    const fetchConfig = async () => {
-      const res = await fetch(`${BASE_URL}/config`);
-      const data = await res.json();
-      return data;
-    };
-
     setIsTraining(true);
     setModelAccuracy(null);
     setMlpAccuracy(null);
     setCurrentTrainingStage("");
-    setEstimatedTimeRemaining(null);
     setError(null);
     setErrorDetails(null);
 
@@ -415,14 +485,10 @@ export default function TrainingForEngineers() {
       await cleanupModels();
     }
 
-    const config = await fetchConfig();
-    const dbRowLimit = config.db_row_limit;
-    const totalRowCount = await fetchRowCount();
-    const rowCount = Math.min(totalRowCount, dbRowLimit);
-
     const formData = new FormData();
     formData.append("file", csvFile);
     formData.append("training_mode", mode);
+    formData.append("speed_mode", speedMode);
 
     try {
       await fetch(`${BASE_URL}/delete_old_metrics`, { method: "POST" });
@@ -487,7 +553,7 @@ export default function TrainingForEngineers() {
       await waitForXGBTrainingToStart();
       await pollXGBTrainingStatus();
 
-      const mlpResponse = await fetch(`${BASE_URL}/train_MLP_model`, { method: "POST" });
+      const mlpResponse = await fetch(`${BASE_URL}/train_MLP_model?speed_mode=${encodeURIComponent(speedMode)}`, { method: "POST" });
       if (!mlpResponse.ok) {
         throw new Error("Failed to start MLP training.");
       }
@@ -521,9 +587,10 @@ export default function TrainingForEngineers() {
   };
 
   useEffect(() => {
+    const intervalRef = progressIntervalRef;
     return () => {
-      if (progressIntervalRef.current) {
-        clearInterval(progressIntervalRef.current);
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
       }
     };
   }, []);
@@ -928,6 +995,24 @@ export default function TrainingForEngineers() {
                                   <div className="mb-4">
                                     <h6 className="mb-3">Model Training</h6>
                                     <div className="d-flex flex-column align-items-center">
+                                      <div className="w-100 mb-3" style={{ maxWidth: "420px" }}>
+                                        <label className="form-label fw-semibold" htmlFor="speedMode">
+                                          Training Speed
+                                        </label>
+                                        <select
+                                          id="speedMode"
+                                          className="form-select"
+                                          value={speedMode}
+                                          onChange={(e) => setSpeedMode(e.target.value)}
+                                        >
+                                          <option value="fast">Fast (recommended): fewer trials/epochs</option>
+                                          <option value="standard">Standard: higher-quality, slower</option>
+                                        </select>
+                                        <div className="form-text text-start">
+                                          Fast mode usually finishes much sooner, especially on larger CSV files.
+                                        </div>
+                                      </div>
+
                                       <div className="form-check mb-3">
                                         <input
                                           className="form-check-input"
@@ -1078,6 +1163,7 @@ export default function TrainingForEngineers() {
                                 </Button>
                                 <Button
                                   variant="success"
+                                  disabled={resetting}
                                   onClick={async () => {
                                     setResetting(true);
                                     await fetch(`${BASE_URL}/cleanup_models`, { method: "POST" });
@@ -1086,10 +1172,11 @@ export default function TrainingForEngineers() {
                                     setShowResetModal(false);
                                   }}
                                 >
-                                  Clear Models Only
+                                  {resetting ? "Clearing..." : "Clear Models Only"}
                                 </Button>
                                 <Button
                                   variant="danger"
+                                  disabled={resetting}
                                   onClick={async () => {
                                     setResetting(true);
                                     await fetch(`${BASE_URL}/reset_all`, { method: "POST" });
@@ -1098,7 +1185,7 @@ export default function TrainingForEngineers() {
                                     setShowResetModal(false);
                                   }}
                                 >
-                                  Wipe Everything
+                                  {resetting ? "Wiping..." : "Wipe Everything"}
                                 </Button>
                               </Modal.Footer>
                             </Modal>

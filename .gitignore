@@ -101,3 +101,5 @@ docs/RESUME.local.md
 
 .vercel
 .env*.local
+
+data/*

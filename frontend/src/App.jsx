@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import Dashboard from "./pages/Dashboard";
 import TrainingForEngineers from "./pages/TrainingForEngineers";
 import Predictions from "./pages/Predictions";
@@ -22,8 +22,12 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route
-              path="/Training-for-engineers"
+              path="/training-for-engineers"
               element={<TrainingForEngineers />}
+            />
+            <Route
+              path="/Training-for-engineers"
+              element={<Navigate to="/training-for-engineers" replace />}
             />
             <Route path="/:fileName" element={<Predictions />} />
             <Route path="/settings" element={<Settings />} />

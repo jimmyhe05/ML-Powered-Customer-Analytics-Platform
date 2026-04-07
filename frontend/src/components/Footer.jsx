@@ -1,4 +1,3 @@
-import React from "react";
 import { Link } from "react-router-dom";
 
 export default function Footer() {
@@ -54,7 +53,7 @@ export default function Footer() {
                 Dashboard
               </Link>
               <Link
-                to="/Training-for-engineers"
+                to="/training-for-engineers"
                 style={linkStyle}
                 onMouseEnter={handleHover}
                 onMouseLeave={handleLeave}

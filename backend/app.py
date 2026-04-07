@@ -70,9 +70,24 @@ DB_ROW_LIMIT = get_row_limit()
 DB_CONFIG = get_db_config()
 TOTAL_TRIALS = int(os.getenv("XGB_TOTAL_TRIALS", 10))
 MLP_TOTAL_EPOCHS = int(os.getenv("MLP_TOTAL_EPOCHS", 50))
+FAST_XGB_TOTAL_TRIALS = int(os.getenv("FAST_XGB_TOTAL_TRIALS", 3))
+FAST_MLP_TOTAL_EPOCHS = int(os.getenv("FAST_MLP_TOTAL_EPOCHS", 12))
 
 engine = create_engine(
     f'postgresql://{DB_CONFIG["user"]}:{DB_CONFIG["password"]}@{DB_CONFIG["host"]}:{DB_CONFIG["port"]}/{DB_CONFIG["dbname"]}')
+
+
+def normalize_speed_mode(value: str) -> str:
+    mode = (value or "").strip().lower()
+    return "fast" if mode == "fast" else "standard"
+
+
+def xgb_trials_for_mode(mode: str) -> int:
+    return FAST_XGB_TOTAL_TRIALS if mode == "fast" else TOTAL_TRIALS
+
+
+def mlp_epochs_for_mode(mode: str) -> int:
+    return FAST_MLP_TOTAL_EPOCHS if mode == "fast" else MLP_TOTAL_EPOCHS
 
 
 
@@ -913,6 +928,9 @@ def delete_old_metrics():
 #Train XGBoost in background thread
 @app.route('/train_model', methods=['POST'])
 def train_model():
+    speed_mode = normalize_speed_mode(request.form.get("speed_mode"))
+    current_total_trials = xgb_trials_for_mode(speed_mode)
+
     if os.path.exists("xgb_training_progress.json"):
         with open("xgb_training_progress.json", "r") as f:
             status = json.load(f).get("status", "not_started")
@@ -921,7 +939,7 @@ def train_model():
 
     # Mark training as started
     with open("xgb_training_progress.json", "w") as f:
-        json.dump({"status": "in_progress", "current_trial": 0, "total_trials": TOTAL_TRIALS}, f)
+        json.dump({"status": "in_progress", "current_trial": 0, "total_trials": current_total_trials}, f)
 
     """Handles XGBoost model training using a background thread."""
     
@@ -971,10 +989,12 @@ def train_model():
                 # Churn column required
                 if 'churn' not in df.columns:
                     with open("xgb_training_progress.json", "w") as f:
-                        json.dump({"status": "error", "current_trial": 0, "total_trials": TOTAL_TRIALS}, f)
+                        json.dump({"status": "error", "current_trial": 0, "total_trials": current_total_trials}, f)
                     return
 
-                subprocess.run(["python", "train.py", output_path], check=True)
+                train_env = os.environ.copy()
+                train_env["XGB_TOTAL_TRIALS"] = str(current_total_trials)
+                subprocess.run(["python", "train.py", output_path], check=True, env=train_env)
 
                 # Poll for end of training. 
                 timeout = 600  # seconds
@@ -993,15 +1013,15 @@ def train_model():
                     with open("model_metrics.json", "r") as f:
                         metrics = json.load(f)
                     with open("xgb_training_progress.json", "w") as f:
-                        json.dump({"status": "completed", "current_trial": TOTAL_TRIALS, "total_trials": TOTAL_TRIALS}, f)
+                        json.dump({"status": "completed", "current_trial": current_total_trials, "total_trials": current_total_trials}, f)
                 else:
                     with open("xgb_training_progress.json", "w") as f:
-                        json.dump({"status": "error", "current_trial": 0, "total_trials": TOTAL_TRIALS}, f)
+                        json.dump({"status": "error", "current_trial": 0, "total_trials": current_total_trials}, f)
 
             except Exception as e:
                 logger.error(f"❌ XGBoost training failed: {e}")
                 with open("xgb_training_progress.json", "w") as f:
-                    json.dump({"status": "error", "current_trial": 0, "total_trials": TOTAL_TRIALS}, f)
+                    json.dump({"status": "error", "current_trial": 0, "total_trials": current_total_trials}, f)
 
         # Start background thread and return immediately
         thread = threading.Thread(target=run_training)
@@ -1017,6 +1037,9 @@ def train_model():
 # Train the MLP Model in background thread
 @app.route('/train_MLP_model', methods=['POST'])
 def train_MLP_model():
+    speed_mode = normalize_speed_mode(request.args.get("speed_mode") or request.form.get("speed_mode"))
+    current_total_epochs = mlp_epochs_for_mode(speed_mode)
+
     if os.path.exists("mlp_training_progress.json"):
         with open("mlp_training_progress.json", "r") as f:
             status = json.load(f).get("status", "not_started")
@@ -1025,7 +1048,7 @@ def train_MLP_model():
 
     # Mark training as started
     with open("mlp_training_progress.json", "w") as f:
-        json.dump({"status": "in_progress", "current_epoch": 0, "total_epochs": MLP_TOTAL_EPOCHS}, f)
+        json.dump({"status": "in_progress", "current_epoch": 0, "total_epochs": current_total_epochs}, f)
 
 
     def run_training():
@@ -1042,7 +1065,9 @@ def train_MLP_model():
                 return
 
             logger.info("🚀 Starting MLP training process...")
-            subprocess.run(["python", "MLP1.py", output_path], check=True)
+            train_env = os.environ.copy()
+            train_env["MLP_TOTAL_EPOCHS"] = str(current_total_epochs)
+            subprocess.run(["python", "MLP1.py", output_path], check=True, env=train_env)
             logger.info("✅ MLP training complete. Reloading new model...")
             
             # Poll for end of training.
