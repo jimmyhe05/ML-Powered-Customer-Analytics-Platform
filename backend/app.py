@@ -38,6 +38,27 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def _empty_dashboard_metrics():
+    return {
+        "age_range_counts": [],
+        "activation_counts": [],
+        "app_usage_percentages": [],
+        "churn_counts_per_month": [],
+        "total_users": 0,
+        "data_last_updated": datetime.now().isoformat()
+    }
+
+
+def _empty_return_analysis():
+    return {
+        "source_distribution": [],
+        "defect_distribution": [],
+        "warranty_status": [],
+        "final_status": [],
+        "responsible_party": []
+    }
+
 # AI Model Paths
 MODEL_PATH = "best_churn_model.pkl" #Saved XGBoost Model
 MLP_MODEL_PATH = "MLP_churn_model.pt" #Saved MLP Model
@@ -453,6 +474,9 @@ def get_prediction_batches_with_predictions():
 
         return jsonify(sorted_batches)
 
+    except psycopg2.OperationalError as e:
+        logger.warning(f"⚠️ DB unavailable for /predictions, returning empty result: {e}")
+        return jsonify({})
     except Exception as e:
         logger.error(f"❌ Error fetching predictions: {e}")
         return jsonify({"error": str(e)}), 500
@@ -1436,14 +1460,7 @@ def get_dashboard_data():
         # No data
         if not table_exists:
             conn.close()
-            return jsonify({
-                "age_range_counts": [],
-                "activation_counts": [],
-                "app_usage_percentages": [],
-                "churn_counts_per_month": [],
-                "total_users": 0,
-                "data_last_updated": datetime.now().isoformat()
-            })
+            return jsonify(_empty_dashboard_metrics())
 
         # Query
         df = pd.read_sql("SELECT * FROM dashboard_devices", conn)
@@ -1451,14 +1468,7 @@ def get_dashboard_data():
 
         # No data
         if df.empty:
-            return jsonify({
-                "age_range_counts": [],
-                "activation_counts": [],
-                "app_usage_percentages": [],
-                "churn_counts_per_month": [],
-                "total_users": 0,
-                "data_last_updated": datetime.now().isoformat()
-            })
+            return jsonify(_empty_dashboard_metrics())
 
         # Return structure
         dashboard_metrics = {
@@ -1540,6 +1550,9 @@ def get_dashboard_data():
 
         return jsonify(dashboard_metrics)
 
+    except psycopg2.OperationalError as e:
+        logger.warning(f"⚠️ DB unavailable for /dashboard_data, returning empty metrics: {e}")
+        return jsonify(_empty_dashboard_metrics())
     except Exception as e:
         logger.error(f"❌ Error extracting dashboard data: {e}")
         return jsonify({"error": str(e)}), 500
@@ -1748,6 +1761,9 @@ def carrier_distribution():
 
         return jsonify({"carrier_distribution": distribution})
 
+    except psycopg2.OperationalError as e:
+        logger.warning(f"⚠️ DB unavailable for /carrier_distribution, returning empty distribution: {e}")
+        return jsonify({"carrier_distribution": []})
     except Exception as e:
         logger.error(f"❌ Error analyzing carrier distribution: {e}")
         return jsonify({"error": str(e)}), 500
@@ -1773,26 +1789,14 @@ def return_analysis():
         if not required_cols.issubset(existing_cols):
             logger.warning("⚠️ Some required columns missing in dashboard_devices")
             conn.close()
-            return jsonify({
-                "source_distribution": [],
-                "defect_distribution": [],
-                "warranty_status": [],
-                "final_status": [],
-                "responsible_party": []
-            })
+            return jsonify(_empty_return_analysis())
             
         df = pd.read_sql("SELECT * FROM dashboard_devices", conn)
         conn.close()
 
         #No data
         if df.empty:
-            return jsonify({
-                "source_distribution": [],
-                "defect_distribution": [],
-                "warranty_status": [],
-                "final_status": [],
-                "responsible_party": []
-            })
+            return jsonify(_empty_return_analysis())
 
         #Format data for the frontend graph. 
         returns_df = df[df['type'] == 'Return'].copy()
@@ -1820,6 +1824,9 @@ def return_analysis():
             "responsible_party": responsible_counts.to_dict(orient='records')
         })
 
+    except psycopg2.OperationalError as e:
+        logger.warning(f"⚠️ DB unavailable for /return_analysis, returning empty analysis: {e}")
+        return jsonify(_empty_return_analysis())
     except Exception as e:
         logger.error(f"❌ Error analyzing return data: {e}")
         return jsonify({"error": str(e)}), 500
@@ -1880,6 +1887,9 @@ def time_analysis():
 
         return jsonify({"usage_duration": duration_counts.to_dict(orient='records')})
 
+    except psycopg2.OperationalError as e:
+        logger.warning(f"⚠️ DB unavailable for /time_analysis, returning empty usage data: {e}")
+        return jsonify({"usage_duration": []})
     except Exception as e:
         logger.error(f"❌ Error analyzing time data: {e}")
         return jsonify({"error": str(e)}), 500

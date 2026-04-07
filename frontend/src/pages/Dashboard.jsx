@@ -69,7 +69,21 @@ export default function Dashboard() {
   const [isUploadingDashboard, setIsUploadingDashboard] = useState(false);
 
 
-  const BASE_URL = import.meta.env.VITE_API_URL;
+  const rawApiUrl = import.meta.env.VITE_API_URL?.trim();
+  const BASE_URL = rawApiUrl
+    ? `${rawApiUrl.startsWith("http://") || rawApiUrl.startsWith("https://")
+      ? rawApiUrl
+      : `https://${rawApiUrl}`
+    }`.replace(/\/+$/, "")
+    : "";
+
+  // Runtime guard: if VITE_API_URL wasn't set at build time, avoid making
+  // API requests that become `/undefined/...` and create noisy JSON parse errors.
+  if (!BASE_URL) {
+    console.error(
+      "VITE_API_URL is not set. API requests are disabled until you set VITE_API_URL in Vercel and redeploy."
+    );
+  }
 
   const handleDashboardFileSelect = (event) => {
     const file = event.target.files[0];
@@ -200,6 +214,12 @@ export default function Dashboard() {
 
   // Fetch Dashboard Data
   useEffect(() => {
+    // If the API base URL is missing, bail out early to prevent /undefined/... calls.
+    if (!BASE_URL) {
+      setLoading(false);
+      setError("VITE_API_URL missing - configure VITE_API_URL in Vercel and redeploy the frontend.");
+      return;
+    }
     // Fetch latest predictions
     fetch(`${BASE_URL}/predictions?limit=5`)
       .then((res) => res.json())
@@ -244,14 +264,24 @@ export default function Dashboard() {
     // Fetch Dashboard Data
     console.log(`${BASE_URL}/dashboard_data`);
     fetch(`${BASE_URL}/dashboard_data`)
-      .then((response) => response.json())
+      .then(async (response) => {
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`dashboard_data failed (${response.status}): ${errorText.slice(0, 120)}`);
+        }
+        return response.json();
+      })
       .then((data) => {
+        if (!data || !Array.isArray(data.app_usage_percentages)) {
+          throw new Error(data?.error || "Invalid dashboard_data response");
+        }
         data.app_usage_percentages.sort((a, b) => b.percentage - a.percentage);
         setDashboardData(data);
         setLoading(false);
       })
       .catch((error) => {
         console.error("Error fetching data:", error);
+        setError(error.message || "Failed to load dashboard data");
         setLoading(false);
       });
 
@@ -388,7 +418,7 @@ export default function Dashboard() {
         console.error("Error fetching correlation data:", error);
         setCorrelationData([]);
       });
-  }, [modelTrained]);
+  }, [modelTrained, BASE_URL, riskThreshold]);
 
   // Handle File Drop
   const handleDrop = (event) => {
@@ -805,6 +835,8 @@ export default function Dashboard() {
     ]
     : [];
 
+  const currentPageContent = pages[page]?.content || null;
+
   // Add a function to scroll to the dashboard title
   const scrollToDashboardTitle = () => {
     if (dashboardTitleRef.current) {
@@ -911,7 +943,19 @@ export default function Dashboard() {
         </Row>
 
 
-        <Row className="g-4">{pages[page].content}</Row>
+        <Row className="g-4">
+          {currentPageContent || (
+            <Col>
+              <Card className="border-0 shadow-sm">
+                <Card.Body>
+                  <div className="text-center text-muted py-4">
+                    No dashboard data available yet. Upload dashboard data to populate charts.
+                  </div>
+                </Card.Body>
+              </Card>
+            </Col>
+          )}
+        </Row>
 
         {/* Move pagination closer to the charts */}
         {/* Pagination Row */}

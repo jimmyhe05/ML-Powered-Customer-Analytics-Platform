@@ -15,7 +15,20 @@ import { useNavigate } from "react-router-dom";
 import Papa from "papaparse";
 import { motion, AnimatePresence } from "framer-motion";
 
-const BASE_URL = import.meta.env.VITE_API_URL;
+const rawApiUrl = import.meta.env.VITE_API_URL?.trim();
+const BASE_URL = rawApiUrl
+  ? `${rawApiUrl.startsWith("http://") || rawApiUrl.startsWith("https://")
+    ? rawApiUrl
+    : `https://${rawApiUrl}`
+  }`.replace(/\/+$/, "")
+  : "";
+
+// Runtime guard: prevent noisy fetch attempts when the API URL isn't configured.
+if (!BASE_URL) {
+  console.error(
+    "VITE_API_URL is not set. API requests are disabled until you set VITE_API_URL in Vercel and redeploy."
+  );
+}
 
 export default function TrainingForEngineers() {
   const [csvFile, setCsvFile] = useState(null);
@@ -51,6 +64,13 @@ export default function TrainingForEngineers() {
   // values: 'idle', 'in_progress', 'completed', 'error'
 
   useEffect(() => {
+    // If the base URL is missing, mark server as checked but unhealthy and skip network checks.
+    if (!BASE_URL) {
+      setServerStatus({ checked: true, healthy: false });
+      setError("VITE_API_URL missing - configure VITE_API_URL in Vercel and redeploy the frontend.");
+      return;
+    }
+
     const checkServerHealth = async () => {
       try {
         const response = await fetch(`${BASE_URL}/health`, {

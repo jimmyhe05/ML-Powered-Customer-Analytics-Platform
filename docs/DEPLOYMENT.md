@@ -18,6 +18,8 @@ This guide deploys the app using a free/low-cost split architecture:
 
 ## 2) Deploy backend (Render)
 
+> If deploying to Railway instead of Render, follow **2b** below.
+
 ### Service settings
 
 - Runtime: Python
@@ -48,6 +50,31 @@ After deploy, open:
 - `https://<your-backend-domain>/health`
 
 Expected response includes `status: "ok"`.
+
+### 2b) Deploy backend (Railway - validated flow)
+
+- Link/deploy from backend root so Railway uses Dockerfile:
+  - `railway up . --path-as-root`
+- Set backend database URL on service `ML-Powered-Customer-Analytics-Platform`:
+  - `DATABASE_URL=postgresql://...@postgres.railway.internal:5432/railway`
+
+Notes:
+- Use `DATABASE_URL` (internal Railway host) for the running service.
+- From your local machine, `postgres.railway.internal` is not resolvable; use `DATABASE_PUBLIC_URL` for one-off local migration scripts.
+
+### 2c) Initialize schema (required)
+
+After DB wiring, apply `backend/db/churn_database.sql` once.
+
+- If using a local script, strip the `\c` meta-command before execution (it's psql-only).
+- Confirm these tables exist after migration:
+  - `prediction_batches`
+  - `predictions`
+  - `devices`
+  - `dashboard_devices`
+  - `processed_features`
+
+If schema is missing, `/predictions` will return errors like `relation "prediction_batches" does not exist`.
 
 ## 3) Deploy frontend (Vercel)
 

@@ -1,20 +1,27 @@
-# Ignore everything except the listed files
-**
+# Keep Docker context sane while ensuring all runtime/model files are included.
+# Do NOT blanket-ignore the whole repo (that can drop required modules/models).
 
-!app.py
-!data_processing.py
-!extract_dashboard.py
-!MLP.py
-!model_cleanup.py
-!train.py
-!requirements.txt
-!UW_Churn_Pred_Data.xls
-!compute_feature_importances_MLP.py
+# Python cache / artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
 
-!db/
-!db/churn_database.sql
+# Git / editor files
+.git/
+.gitignore
+.DS_Store
 
-!.env
-!wait-for-postgres.sh
+# Local environments
+.venv/
+venv/
+
+# Notebook / temp files
+*.ipynb
+temp_*
+processed_*
+
+# Optional env file (Railway provides env vars)
+.env
 
 
