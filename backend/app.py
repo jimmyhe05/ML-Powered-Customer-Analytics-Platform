@@ -21,6 +21,7 @@ import threading
 from datetime import datetime
 from typing import Dict, List, Any
 import time
+import uuid
 from config import get_db_config, get_row_limit
 
 # Flask App - Provides REST APIs for communication between the backend, Database, and Frontend React App.
@@ -72,6 +73,9 @@ TOTAL_TRIALS = int(os.getenv("XGB_TOTAL_TRIALS", 10))
 MLP_TOTAL_EPOCHS = int(os.getenv("MLP_TOTAL_EPOCHS", 50))
 FAST_XGB_TOTAL_TRIALS = int(os.getenv("FAST_XGB_TOTAL_TRIALS", 3))
 FAST_MLP_TOTAL_EPOCHS = int(os.getenv("FAST_MLP_TOTAL_EPOCHS", 12))
+TRAINING_SESSION_FILE = "active_training_session.json"
+ACTIVE_TRAINING_PROCESSES = {}
+ACTIVE_PROCESSES_LOCK = threading.Lock()
 
 engine = create_engine(
     f'postgresql://{DB_CONFIG["user"]}:{DB_CONFIG["password"]}@{DB_CONFIG["host"]}:{DB_CONFIG["port"]}/{DB_CONFIG["dbname"]}')
@@ -88,6 +92,176 @@ def xgb_trials_for_mode(mode: str) -> int:
 
 def mlp_epochs_for_mode(mode: str) -> int:
     return FAST_MLP_TOTAL_EPOCHS if mode == "fast" else MLP_TOTAL_EPOCHS
+
+
+def _read_json_file(file_path: str, default: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        with open(file_path, "r") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def _read_training_session() -> Dict[str, Any] | None:
+    if not os.path.exists(TRAINING_SESSION_FILE):
+        return None
+    return _read_json_file(TRAINING_SESSION_FILE, {})
+
+
+def _write_training_session(session: Dict[str, Any]) -> None:
+    with open(TRAINING_SESSION_FILE, "w") as f:
+        json.dump(session, f)
+
+
+def _update_training_session(training_id: str, **fields) -> None:
+    session = _read_training_session()
+    if not session or session.get("training_id") != training_id:
+        return
+
+    session.update(fields)
+    session["updated_at"] = datetime.now().isoformat()
+    _write_training_session(session)
+
+
+def _clear_training_session() -> None:
+    if os.path.exists(TRAINING_SESSION_FILE):
+        os.remove(TRAINING_SESSION_FILE)
+
+
+def _resolve_overall_status(xgb_status: str, mlp_status: str) -> str:
+    if xgb_status == "cancelled" or mlp_status == "cancelled":
+        return "cancelled"
+    if xgb_status == "error" or mlp_status == "error":
+        return "error"
+    if xgb_status == "completed" and mlp_status == "completed":
+        return "completed"
+    if xgb_status == "in_progress" or mlp_status == "in_progress":
+        return "in_progress"
+    return "not_started"
+
+
+def _ensure_training_session(training_id: str | None, speed_mode: str) -> Dict[str, Any]:
+    existing = _read_training_session()
+
+    if training_id and existing and existing.get("training_id") == training_id:
+        existing["speed_mode"] = speed_mode
+        existing["cancelled"] = False
+        existing["updated_at"] = datetime.now().isoformat()
+        _write_training_session(existing)
+        return existing
+
+    session = {
+        "training_id": training_id or str(uuid.uuid4()),
+        "speed_mode": speed_mode,
+        "cancelled": False,
+        "created_at": datetime.now().isoformat(),
+        "updated_at": datetime.now().isoformat(),
+    }
+    _write_training_session(session)
+    return session
+
+
+def _build_training_session_payload(training_id: str) -> Dict[str, Any] | None:
+    session = _read_training_session()
+    if not session or session.get("training_id") != training_id:
+        return None
+
+    xgb_progress = _read_json_file(
+        "xgb_training_progress.json",
+        {"status": "not_started", "current_trial": 0, "total_trials": TOTAL_TRIALS},
+    )
+    mlp_progress = _read_json_file(
+        "mlp_training_progress.json",
+        {"status": "not_started", "current_epoch": 0, "total_epochs": MLP_TOTAL_EPOCHS},
+    )
+
+    xgb_status = xgb_progress.get("status", "not_started")
+    mlp_status = mlp_progress.get("status", "not_started")
+
+    payload = {
+        "training_id": training_id,
+        "speed_mode": session.get("speed_mode", "standard"),
+        "cancelled": bool(session.get("cancelled", False)),
+        "created_at": session.get("created_at"),
+        "updated_at": session.get("updated_at"),
+        "overall_status": _resolve_overall_status(xgb_status, mlp_status),
+        "xgb": xgb_progress,
+        "mlp": mlp_progress,
+    }
+
+    if xgb_status == "completed" and os.path.exists("model_metrics.json"):
+        payload["xgb_metrics"] = _read_json_file("model_metrics.json", {})
+    if mlp_status == "completed" and os.path.exists("MLP_metrics.json"):
+        payload["mlp_metrics"] = _read_json_file("MLP_metrics.json", {})
+
+    return payload
+
+
+def _is_training_cancelled(training_id: str) -> bool:
+    session = _read_training_session()
+    if not session or session.get("training_id") != training_id:
+        return False
+    return bool(session.get("cancelled", False))
+
+
+def _register_training_process(training_id: str, process_name: str, process: subprocess.Popen) -> None:
+    with ACTIVE_PROCESSES_LOCK:
+        ACTIVE_TRAINING_PROCESSES[(training_id, process_name)] = process
+
+
+def _unregister_training_process(training_id: str, process_name: str) -> None:
+    with ACTIVE_PROCESSES_LOCK:
+        ACTIVE_TRAINING_PROCESSES.pop((training_id, process_name), None)
+
+
+def _terminate_training_processes(training_id: str) -> None:
+    with ACTIVE_PROCESSES_LOCK:
+        items = [
+            ((tid, pname), proc)
+            for (tid, pname), proc in ACTIVE_TRAINING_PROCESSES.items()
+            if tid == training_id
+        ]
+
+    for (tid, pname), proc in items:
+        try:
+            if proc and proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            _unregister_training_process(tid, pname)
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to terminate process {pname} for {training_id}: {e}")
+
+
+def _run_subprocess_with_cancellation(command, training_id: str, process_name: str, env=None) -> None:
+    if _is_training_cancelled(training_id):
+        raise InterruptedError("Training cancelled")
+
+    process = subprocess.Popen(command, env=env)
+    _register_training_process(training_id, process_name, process)
+
+    try:
+        while True:
+            if _is_training_cancelled(training_id):
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                raise InterruptedError("Training cancelled")
+
+            return_code = process.poll()
+            if return_code is not None:
+                if return_code != 0:
+                    raise subprocess.CalledProcessError(return_code, command)
+                return
+
+            time.sleep(1)
+    finally:
+        _unregister_training_process(training_id, process_name)
 
 
 
@@ -925,11 +1099,126 @@ def delete_old_metrics():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/training_session', methods=['POST'])
+def create_training_session():
+    speed_mode = normalize_speed_mode(
+        request.form.get("speed_mode")
+        or (request.get_json(silent=True) or {}).get("speed_mode")
+    )
+    session = _ensure_training_session(None, speed_mode)
+    return jsonify({
+        "message": "✅ Training session created.",
+        "training_id": session["training_id"],
+        "speed_mode": session["speed_mode"],
+    }), 201
+
+
+@app.route('/training_session/active', methods=['GET'])
+def get_active_training_session():
+    session = _read_training_session()
+    if not session or not session.get("training_id"):
+        return jsonify({"active": False}), 200
+
+    payload = _build_training_session_payload(session["training_id"])
+    if not payload:
+        return jsonify({"active": False}), 200
+
+    return jsonify({"active": True, "session": payload}), 200
+
+
+@app.route('/training_session/<training_id>', methods=['GET'])
+def get_training_session(training_id):
+    payload = _build_training_session_payload(training_id)
+    if not payload:
+        return jsonify({"error": "Training session not found."}), 404
+    return jsonify(payload), 200
+
+
+@app.route('/training_session/<training_id>/cancel', methods=['POST'])
+def cancel_training_session(training_id):
+    session = _read_training_session()
+    if not session or session.get("training_id") != training_id:
+        return jsonify({"error": "Training session not found."}), 404
+
+    _update_training_session(training_id, cancelled=True, cancelled_at=datetime.now().isoformat())
+    _terminate_training_processes(training_id)
+
+    xgb_progress = _read_json_file(
+        "xgb_training_progress.json",
+        {"status": "not_started", "current_trial": 0, "total_trials": TOTAL_TRIALS},
+    )
+    xgb_progress["status"] = "cancelled"
+    with open("xgb_training_progress.json", "w") as f:
+        json.dump(xgb_progress, f)
+
+    mlp_progress = _read_json_file(
+        "mlp_training_progress.json",
+        {"status": "not_started", "current_epoch": 0, "total_epochs": MLP_TOTAL_EPOCHS},
+    )
+    mlp_progress["status"] = "cancelled"
+    with open("mlp_training_progress.json", "w") as f:
+        json.dump(mlp_progress, f)
+
+    return jsonify({"message": "✅ Training cancelled.", "training_id": training_id}), 200
+
+
+@app.route('/reset_training_state', methods=['POST'])
+def reset_training_state():
+    """
+    Resets training state/progress artifacts so users can recover from a stuck
+    training session and start a new upload/training flow.
+    Does NOT wipe database tables.
+    """
+    try:
+        existing_session = _read_training_session()
+        if existing_session and existing_session.get("training_id"):
+            _terminate_training_processes(existing_session["training_id"])
+
+        # Reset progress files
+        with open("xgb_training_progress.json", "w") as f:
+            json.dump({"status": "not_started", "current_trial": 0, "total_trials": TOTAL_TRIALS}, f)
+
+        with open("mlp_training_progress.json", "w") as f:
+            json.dump({"status": "not_started", "current_epoch": 0, "total_epochs": MLP_TOTAL_EPOCHS}, f)
+
+        # Remove stale artifacts and models from previous attempts
+        artifacts_to_delete = [
+            "model_metrics.json",
+            "MLP_metrics.json",
+            "XGB_training_success_token.txt",
+            "MLP_training_success_token.txt",
+            "best_churn_model.pkl",
+            "MLP_churn_model.pt",
+            "trained_features.json",
+            "trained_features_MLP.json",
+            "MLP_importance.json",
+            "processed_churn_data.csv",
+            "temp_device_numbers.csv",
+        ]
+
+        for artifact in artifacts_to_delete:
+            if os.path.exists(artifact):
+                os.remove(artifact)
+
+        _clear_training_session()
+
+        logger.info("✅ Training state reset successfully via /reset_training_state")
+        return jsonify({"message": "✅ Training state reset. You can re-upload data and retrain."}), 200
+
+    except Exception as e:
+        logger.error(f"❌ Failed to reset training state: {e}")
+        return jsonify({"error": "Failed to reset training state.", "details": str(e)}), 500
+
+
 #Train XGBoost in background thread
 @app.route('/train_model', methods=['POST'])
 def train_model():
     speed_mode = normalize_speed_mode(request.form.get("speed_mode"))
     current_total_trials = xgb_trials_for_mode(speed_mode)
+    requested_training_id = request.form.get("training_id")
+    session = _ensure_training_session(requested_training_id, speed_mode)
+    training_id = session["training_id"]
+    _update_training_session(training_id, speed_mode=speed_mode)
 
     if os.path.exists("xgb_training_progress.json"):
         with open("xgb_training_progress.json", "r") as f:
@@ -983,24 +1272,36 @@ def train_model():
                 # Train XGBoost on processed data from the database.
                 input_path = "from_db"
                 output_path = "processed_churn_data.csv"
-                subprocess.run(["python", "data_processing.py", input_path, output_path, "train"], check=True) #Process data
+                _run_subprocess_with_cancellation(
+                    ["python", "data_processing.py", input_path, output_path, "train"],
+                    training_id,
+                    "xgb_data_processing",
+                )
                 df = pd.read_csv(output_path)
                 
                 # Churn column required
                 if 'churn' not in df.columns:
                     with open("xgb_training_progress.json", "w") as f:
                         json.dump({"status": "error", "current_trial": 0, "total_trials": current_total_trials}, f)
+                    _update_training_session(training_id)
                     return
 
                 train_env = os.environ.copy()
                 train_env["XGB_TOTAL_TRIALS"] = str(current_total_trials)
-                subprocess.run(["python", "train.py", output_path], check=True, env=train_env)
+                _run_subprocess_with_cancellation(
+                    ["python", "train.py", output_path],
+                    training_id,
+                    "xgb_training",
+                    env=train_env,
+                )
 
                 # Poll for end of training. 
                 timeout = 600  # seconds
                 start_time = time.time()
 
                 while not os.path.exists("XGB_training_success_token.txt"):
+                    if _is_training_cancelled(training_id):
+                        raise InterruptedError("Training cancelled")
                     if time.time() - start_time > timeout:
                         raise TimeoutError("Training token not created within timeout.")
                     time.sleep(2)  # wait 2 seconds and check again
@@ -1014,20 +1315,27 @@ def train_model():
                         metrics = json.load(f)
                     with open("xgb_training_progress.json", "w") as f:
                         json.dump({"status": "completed", "current_trial": current_total_trials, "total_trials": current_total_trials}, f)
+                    _update_training_session(training_id)
                 else:
                     with open("xgb_training_progress.json", "w") as f:
                         json.dump({"status": "error", "current_trial": 0, "total_trials": current_total_trials}, f)
+                    _update_training_session(training_id)
 
+            except InterruptedError:
+                with open("xgb_training_progress.json", "w") as f:
+                    json.dump({"status": "cancelled", "current_trial": 0, "total_trials": current_total_trials}, f)
+                _update_training_session(training_id, cancelled=True)
             except Exception as e:
                 logger.error(f"❌ XGBoost training failed: {e}")
                 with open("xgb_training_progress.json", "w") as f:
                     json.dump({"status": "error", "current_trial": 0, "total_trials": current_total_trials}, f)
+                _update_training_session(training_id)
 
         # Start background thread and return immediately
         thread = threading.Thread(target=run_training)
         thread.start()
 
-        return jsonify({"message": "🚀 XGBoost training started."}), 202
+        return jsonify({"message": "🚀 XGBoost training started.", "training_id": training_id}), 202
 
     except Exception as e:
         logger.error(f"❌ Unexpected error starting XGBoost training: {e}")
@@ -1039,6 +1347,10 @@ def train_model():
 def train_MLP_model():
     speed_mode = normalize_speed_mode(request.args.get("speed_mode") or request.form.get("speed_mode"))
     current_total_epochs = mlp_epochs_for_mode(speed_mode)
+    requested_training_id = request.args.get("training_id") or request.form.get("training_id")
+    session = _ensure_training_session(requested_training_id, speed_mode)
+    training_id = session["training_id"]
+    _update_training_session(training_id, speed_mode=speed_mode)
 
     if os.path.exists("mlp_training_progress.json"):
         with open("mlp_training_progress.json", "r") as f:
@@ -1058,16 +1370,26 @@ def train_MLP_model():
             output_path = "processed_churn_data.csv"
             mode = "train"
             
-            subprocess.run(["python", "data_processing.py", input_path, output_path, mode], check=True)
+            _run_subprocess_with_cancellation(
+                ["python", "data_processing.py", input_path, output_path, mode],
+                training_id,
+                "mlp_data_processing",
+            )
 
             df = pd.read_csv(output_path)
             if 'churn' not in df.columns:
+                _update_training_session(training_id)
                 return
 
             logger.info("🚀 Starting MLP training process...")
             train_env = os.environ.copy()
             train_env["MLP_TOTAL_EPOCHS"] = str(current_total_epochs)
-            subprocess.run(["python", "MLP1.py", output_path], check=True, env=train_env)
+            _run_subprocess_with_cancellation(
+                ["python", "MLP1.py", output_path],
+                training_id,
+                "mlp_training",
+                env=train_env,
+            )
             logger.info("✅ MLP training complete. Reloading new model...")
             
             # Poll for end of training.
@@ -1075,6 +1397,8 @@ def train_MLP_model():
             start_time = time.time()
             
             while not os.path.exists("MLP_training_success_token.txt"):
+                if _is_training_cancelled(training_id):
+                    raise InterruptedError("Training cancelled")
                 if time.time() - start_time > timeout:
                     raise TimeoutError("Training token not created within timeout.")
                 time.sleep(2)
@@ -1088,17 +1412,26 @@ def train_MLP_model():
             if os.path.exists("MLP_training_success_token.txt") and os.path.exists(metrics_file):
                 with open(metrics_file, "r") as f:
                     metrics = json.load(f)
+                _update_training_session(training_id)
             else:
-                logger.error(f"❌ MLP training failed: {e}")
+                logger.error("❌ MLP training failed: missing success token or metrics file")
+                with open("mlp_training_progress.json", "w") as f:
+                    json.dump({"status": "error", "current_epoch": 0, "total_epochs": current_total_epochs}, f)
+                _update_training_session(training_id)
 
+        except InterruptedError:
+            with open("mlp_training_progress.json", "w") as f:
+                json.dump({"status": "cancelled", "current_epoch": 0, "total_epochs": current_total_epochs}, f)
+            _update_training_session(training_id, cancelled=True)
         except Exception as e:
             logger.error(f"❌ MLP training failed: {e}")
+            _update_training_session(training_id)
 
     # Initialize training status and start background thread
     thread = threading.Thread(target=run_training)
     thread.start()
     
-    return jsonify({"message": "🚀 MLP training started."}), 202
+    return jsonify({"message": "🚀 MLP training started.", "training_id": training_id}), 202
 
 
 #Returns the status of training for the XGboost. Used by the frontend polling system. 

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Modal } from "react-bootstrap";
 import {
   Container,
@@ -60,7 +60,18 @@ export default function TrainingForEngineers() {
   const [resetting, setResetting] = useState(false);
   const [mlpTrainingStatus, setMlpTrainingStatus] = useState("idle");
   const [xgbTrainingStatus, setXGBTrainingStatus] = useState("idle");
-  // values: 'idle', 'in_progress', 'completed', 'error'
+  const [trainingSessionId, setTrainingSessionId] = useState(() => localStorage.getItem("activeTrainingSessionId") || null);
+  // values: 'idle', 'in_progress', 'completed', 'error', 'cancelled'
+
+  const setActiveTrainingSessionId = (id) => {
+    if (!id) {
+      localStorage.removeItem("activeTrainingSessionId");
+      setTrainingSessionId(null);
+      return;
+    }
+    localStorage.setItem("activeTrainingSessionId", id);
+    setTrainingSessionId(id);
+  };
 
   useEffect(() => {
     // If the base URL is missing, mark server as checked but unhealthy and skip network checks.
@@ -90,23 +101,54 @@ export default function TrainingForEngineers() {
     checkServerHealth();
   }, []);
 
-  const syncTrainingStateFromBackend = async () => {
+  const syncTrainingStateFromBackend = useCallback(async () => {
     if (!BASE_URL) return;
 
     try {
-      const [xgbStatusRes, xgbProgressRes, mlpStatusRes, mlpProgressRes] = await Promise.all([
-        fetch(`${BASE_URL}/training_status_XGB`),
-        fetch(`${BASE_URL}/training_progress_XGB`),
-        fetch(`${BASE_URL}/training_status_MLP`),
-        fetch(`${BASE_URL}/training_progress_MLP`),
-      ]);
+      let xgbStatusData = null;
+      let xgbProgressData = null;
+      let mlpStatusData = null;
+      let mlpProgressData = null;
 
-      const [xgbStatusData, xgbProgressData, mlpStatusData, mlpProgressData] = await Promise.all([
-        xgbStatusRes.json(),
-        xgbProgressRes.json(),
-        mlpStatusRes.json(),
-        mlpProgressRes.json(),
-      ]);
+      let sessionPayload = null;
+      if (trainingSessionId) {
+        const sessionRes = await fetch(`${BASE_URL}/training_session/${encodeURIComponent(trainingSessionId)}`);
+        if (sessionRes.ok) {
+          sessionPayload = await sessionRes.json();
+        }
+      }
+
+      if (!sessionPayload) {
+        const activeRes = await fetch(`${BASE_URL}/training_session/active`);
+        if (activeRes.ok) {
+          const activeData = await activeRes.json();
+          if (activeData?.active && activeData?.session) {
+            sessionPayload = activeData.session;
+            setActiveTrainingSessionId(activeData.session.training_id);
+          }
+        }
+      }
+
+      if (sessionPayload) {
+        xgbProgressData = sessionPayload.xgb || {};
+        mlpProgressData = sessionPayload.mlp || {};
+        xgbStatusData = sessionPayload.xgb || {};
+        mlpStatusData = sessionPayload.mlp || {};
+      } else {
+        const [xgbStatusRes, xgbProgressRes, mlpStatusRes, mlpProgressRes] = await Promise.all([
+          fetch(`${BASE_URL}/training_status_XGB`),
+          fetch(`${BASE_URL}/training_progress_XGB`),
+          fetch(`${BASE_URL}/training_status_MLP`),
+          fetch(`${BASE_URL}/training_progress_MLP`),
+        ]);
+
+        [xgbStatusData, xgbProgressData, mlpStatusData, mlpProgressData] = await Promise.all([
+          xgbStatusRes.json(),
+          xgbProgressRes.json(),
+          mlpStatusRes.json(),
+          mlpProgressRes.json(),
+        ]);
+      }
 
       const xgbStatus = xgbStatusData?.status || "not_started";
       const mlpStatus = mlpStatusData?.status || "not_started";
@@ -143,6 +185,16 @@ export default function TrainingForEngineers() {
         return;
       }
 
+      if (xgbStatus === "cancelled" || mlpStatus === "cancelled" || sessionPayload?.overall_status === "cancelled") {
+        setIsTraining(false);
+        setCurrentStep(0);
+        setError("Training was cancelled. Re-upload your CSV to start again.");
+        setXGBTrainingStatus("cancelled");
+        setMlpTrainingStatus("cancelled");
+        setActiveTrainingSessionId(null);
+        return;
+      }
+
       const anyInProgress = xgbStatus === "in_progress" || mlpStatus === "in_progress";
       const bothCompleted = xgbStatus === "completed" && mlpStatus === "completed";
 
@@ -157,6 +209,7 @@ export default function TrainingForEngineers() {
         setCurrentStep(2);
         setXGBTrainingStatus("completed");
         setMlpTrainingStatus("completed");
+        setActiveTrainingSessionId(null);
       } else {
         setXGBTrainingStatus(xgbStatus === "not_started" ? "idle" : xgbStatus);
         setMlpTrainingStatus(mlpStatus === "not_started" ? "idle" : mlpStatus);
@@ -164,7 +217,7 @@ export default function TrainingForEngineers() {
     } catch (err) {
       console.error("Failed to sync training state from backend:", err);
     }
-  };
+  }, [trainingSessionId]);
 
   useEffect(() => {
     if (!BASE_URL) return;
@@ -173,7 +226,7 @@ export default function TrainingForEngineers() {
     const intervalId = setInterval(syncTrainingStateFromBackend, 2500);
 
     return () => clearInterval(intervalId);
-  }, []);
+  }, [syncTrainingStateFromBackend]);
 
   const handleDrop = (event) => {
     event.preventDefault();
@@ -332,6 +385,10 @@ export default function TrainingForEngineers() {
               setXGBTrainingStatus(data.status);
               resolve();
               return;
+            } else if (data.status === "cancelled") {
+              setError("Training was cancelled.");
+              reject(new Error("cancelled"));
+              return;
             } else if (data.status === "error") {
               setError("XGBoost Training failed.");
               setErrorDetails(data.message);
@@ -391,6 +448,9 @@ export default function TrainingForEngineers() {
             setMlpAccuracy(data.metrics);
             setMlpTrainingStatus(data.status);
             return;
+          } else if (data.status === "cancelled") {
+            setError("Training was cancelled.");
+            return;
           } else if (data.status === "error") {
             setError("MLP Training failed.");
             setErrorDetails(data.message);
@@ -428,6 +488,11 @@ export default function TrainingForEngineers() {
               return;
             }
 
+            if (data.status === "cancelled") {
+              reject(new Error("cancelled"));
+              return;
+            }
+
             if (Date.now() - startTime > timeoutLimit) {
               reject(new Error("Timeout waiting for XGBoost training to start."));
               return;
@@ -456,6 +521,11 @@ export default function TrainingForEngineers() {
 
             if (data.status === "in_progress") {
               resolve();
+              return;
+            }
+
+            if (data.status === "cancelled") {
+              reject(new Error("cancelled"));
               return;
             }
 
@@ -491,13 +561,40 @@ export default function TrainingForEngineers() {
     formData.append("speed_mode", speedMode);
 
     try {
+      let activeSessionId = trainingSessionId;
+      if (!activeSessionId) {
+        const sessionRes = await fetch(`${BASE_URL}/training_session`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ speed_mode: speedMode }),
+        });
+        if (!sessionRes.ok) {
+          throw new Error("Failed to create training session.");
+        }
+        const sessionData = await sessionRes.json();
+        activeSessionId = sessionData.training_id;
+        setActiveTrainingSessionId(activeSessionId);
+      }
+
+      formData.append("training_id", activeSessionId);
+
       await fetch(`${BASE_URL}/delete_old_metrics`, { method: "POST" });
 
       try {
-        await fetch(`${BASE_URL}/train_model`, {
+        const trainStartRes = await fetch(`${BASE_URL}/train_model`, {
           method: "POST",
           body: formData,
         });
+
+        if (!trainStartRes.ok) {
+          throw new Error("Failed to start XGBoost training.");
+        }
+
+        const trainStartData = await trainStartRes.json();
+        if (trainStartData?.training_id) {
+          setActiveTrainingSessionId(trainStartData.training_id);
+          activeSessionId = trainStartData.training_id;
+        }
       } catch (err) {
         console.error("Failed to start training:", err);
         setError("Failed to start training.");
@@ -553,7 +650,7 @@ export default function TrainingForEngineers() {
       await waitForXGBTrainingToStart();
       await pollXGBTrainingStatus();
 
-      const mlpResponse = await fetch(`${BASE_URL}/train_MLP_model?speed_mode=${encodeURIComponent(speedMode)}`, { method: "POST" });
+      const mlpResponse = await fetch(`${BASE_URL}/train_MLP_model?speed_mode=${encodeURIComponent(speedMode)}&training_id=${encodeURIComponent(activeSessionId)}`, { method: "POST" });
       if (!mlpResponse.ok) {
         throw new Error("Failed to start MLP training.");
       }
@@ -564,6 +661,14 @@ export default function TrainingForEngineers() {
       setRetryAttempted(false);
     } catch (err) {
       console.error("Training error:", err);
+
+      if ((err?.message || "").toLowerCase().includes("cancelled")) {
+        setIsTraining(false);
+        setCurrentStep(0);
+        setError("Training was cancelled. Re-upload your CSV to start again.");
+        setActiveTrainingSessionId(null);
+        return;
+      }
 
       let errorMsg = "An error occurred during training.";
 
@@ -684,6 +789,82 @@ export default function TrainingForEngineers() {
     setXGBTrainingStatus("idle");
     setXgbProgress(0);
     setMlpProgress(0);
+  };
+
+  const handleForceResetTraining = async () => {
+    const confirmed = window.confirm(
+      "This will reset current training progress and clear uploaded model artifacts. Continue?"
+    );
+
+    if (!confirmed) return;
+
+    setResetting(true);
+    try {
+      const response = await fetch(`${BASE_URL}/reset_training_state`, {
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to reset training state");
+      }
+
+      setIsTraining(false);
+      setCurrentStep(0);
+      setCsvFile(null);
+      setModelAccuracy(null);
+      setMlpAccuracy(null);
+      setError(null);
+      setErrorDetails(null);
+      setCurrentTrainingStage("");
+      setMlpTrainingStatus("idle");
+      setXGBTrainingStatus("idle");
+      setXgbProgress(0);
+      setMlpProgress(0);
+      setShowResetModal(false);
+      setActiveTrainingSessionId(null);
+    } catch (err) {
+      console.error("Reset training state failed:", err);
+      setError("Failed to reset stuck training. Please try again.");
+    } finally {
+      setResetting(false);
+    }
+  };
+
+  const handleCancelTraining = async () => {
+    if (!trainingSessionId) {
+      setError("No active training session found.");
+      return;
+    }
+
+    const confirmed = window.confirm("Cancel the current training run?");
+    if (!confirmed) return;
+
+    setResetting(true);
+    try {
+      const response = await fetch(`${BASE_URL}/training_session/${encodeURIComponent(trainingSessionId)}/cancel`, {
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to cancel training");
+      }
+
+      setIsTraining(false);
+      setCurrentStep(0);
+      setCsvFile(null);
+      setCurrentTrainingStage("");
+      setXgbProgress(0);
+      setMlpProgress(0);
+      setXGBTrainingStatus("cancelled");
+      setMlpTrainingStatus("cancelled");
+      setActiveTrainingSessionId(null);
+      setError("Training was cancelled. Re-upload your CSV to start again.");
+    } catch (err) {
+      console.error("Cancel training failed:", err);
+      setError("Failed to cancel training. Please try reset.");
+    } finally {
+      setResetting(false);
+    }
   };
 
   const navigateStep = (step) => {
@@ -989,6 +1170,23 @@ export default function TrainingForEngineers() {
                                       </span>
                                     )}
                                   </div>
+                                  <div className="mt-4">
+                                    <Button
+                                      variant="warning"
+                                      className="me-2"
+                                      disabled={resetting}
+                                      onClick={handleCancelTraining}
+                                    >
+                                      {resetting ? "Cancelling..." : "Cancel Training"}
+                                    </Button>
+                                    <Button
+                                      variant="outline-danger"
+                                      disabled={resetting}
+                                      onClick={handleForceResetTraining}
+                                    >
+                                      {resetting ? "Resetting Training..." : "Training Stuck? Reset & Re-upload"}
+                                    </Button>
+                                  </div>
                                 </div>
                               ) : (
                                 <div className="text-center">
@@ -1169,6 +1367,7 @@ export default function TrainingForEngineers() {
                                     await fetch(`${BASE_URL}/cleanup_models`, { method: "POST" });
                                     setResetting(false);
                                     resetTraining();
+                                    setActiveTrainingSessionId(null);
                                     setShowResetModal(false);
                                   }}
                                 >
@@ -1182,6 +1381,7 @@ export default function TrainingForEngineers() {
                                     await fetch(`${BASE_URL}/reset_all`, { method: "POST" });
                                     setResetting(false);
                                     resetTraining();
+                                    setActiveTrainingSessionId(null);
                                     setShowResetModal(false);
                                   }}
                                 >
