@@ -21,6 +21,24 @@ const COLORS = {
 };
 
 const AppUsageChart = ({ data }) => {
+  if (!Array.isArray(data) || data.length === 0) {
+    return (
+      <Card className="shadow-sm border-0 h-100">
+        <Card.Header className="bg-danger bg-opacity-10 border-0 py-3">
+          <div className="d-flex justify-content-between align-items-center">
+            <div>
+              <h5 className="mb-0 text-danger fw-semibold">Application Usage Analysis</h5>
+            </div>
+            <Badge bg="danger" className="px-3 py-2 fw-normal">Usage Stats</Badge>
+          </div>
+        </Card.Header>
+        <Card.Body className="p-4 text-center text-muted">
+          No application usage data available in uploaded dashboard dataset.
+        </Card.Body>
+      </Card>
+    );
+  }
+
   // Sort data by percentage in descending order
   const sortedData = [...data].sort((a, b) => b.percentage - a.percentage);
   const maxPercentage = Math.max(...sortedData.map((item) => item.percentage));

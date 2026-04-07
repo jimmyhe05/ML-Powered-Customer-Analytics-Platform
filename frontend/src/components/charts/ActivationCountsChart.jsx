@@ -20,14 +20,58 @@ const getActivationColor = (value, maxValue) => {
 };
 
 const ActivationCountsChart = ({ data }) => {
+  if (!Array.isArray(data) || data.length === 0) {
+    return (
+      <Card className="shadow-sm border-0 h-100">
+        <Card.Header className="bg-success bg-opacity-10 border-0 py-3">
+          <div className="d-flex justify-content-between align-items-center">
+            <h5 className="mb-0 text-success fw-semibold">Device Activation Trend</h5>
+            <Badge bg="success" className="px-3 py-2 fw-normal">Monthly Trend</Badge>
+          </div>
+        </Card.Header>
+        <Card.Body className="p-4 text-center text-muted">
+          No monthly activation data available.
+        </Card.Body>
+      </Card>
+    );
+  }
+
   // Find maximum count for color scaling
   const maxCount = Math.max(...data.map((item) => item.count));
 
   // Sort data by month to ensure chronological order
   const sortedData = [...data].sort((a, b) => {
-    const [monthA, yearA] = a.month.split("/");
-    const [monthB, yearB] = b.month.split("/");
-    return new Date(yearA, monthA - 1) - new Date(yearB, monthB - 1);
+    const parseMonthValue = (value) => {
+      const text = String(value || "").trim();
+
+      // MM/YYYY
+      const slashMatch = text.match(/^(\d{1,2})\/(\d{4})$/);
+      if (slashMatch) {
+        const m = Number(slashMatch[1]) - 1;
+        const y = Number(slashMatch[2]);
+        return new Date(y, m, 1).getTime();
+      }
+
+      // YYYY-MM
+      const dashMatch = text.match(/^(\d{4})-(\d{1,2})$/);
+      if (dashMatch) {
+        const y = Number(dashMatch[1]);
+        const m = Number(dashMatch[2]) - 1;
+        return new Date(y, m, 1).getTime();
+      }
+
+      // Month names like "April"
+      const monthOnly = Date.parse(`${text} 1, 2000`);
+      if (!Number.isNaN(monthOnly)) {
+        return monthOnly;
+      }
+
+      // General date fallback
+      const fallback = Date.parse(text);
+      return Number.isNaN(fallback) ? 0 : fallback;
+    };
+
+    return parseMonthValue(a.month) - parseMonthValue(b.month);
   });
 
   return (

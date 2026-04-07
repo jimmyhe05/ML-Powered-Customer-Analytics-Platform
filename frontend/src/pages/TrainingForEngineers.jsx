@@ -14,6 +14,7 @@ import {
 import { useNavigate } from "react-router-dom";
 import Papa from "papaparse";
 import { motion, AnimatePresence } from "framer-motion";
+import PropTypes from "prop-types";
 
 const rawApiUrl = import.meta.env.VITE_API_URL?.trim();
 const BASE_URL = rawApiUrl
@@ -61,6 +62,8 @@ export default function TrainingForEngineers() {
   const [mlpTrainingStatus, setMlpTrainingStatus] = useState("idle");
   const [xgbTrainingStatus, setXGBTrainingStatus] = useState("idle");
   const [trainingSessionId, setTrainingSessionId] = useState(() => localStorage.getItem("activeTrainingSessionId") || null);
+  const [trainingUiActive, setTrainingUiActive] = useState(() => localStorage.getItem("trainingUiActive") === "true");
+  const [supportsSessionApi, setSupportsSessionApi] = useState(true);
   // values: 'idle', 'in_progress', 'completed', 'error', 'cancelled'
 
   const setActiveTrainingSessionId = (id) => {
@@ -71,6 +74,16 @@ export default function TrainingForEngineers() {
     }
     localStorage.setItem("activeTrainingSessionId", id);
     setTrainingSessionId(id);
+  };
+
+  const setTrainingUiActiveFlag = (active) => {
+    if (active) {
+      localStorage.setItem("trainingUiActive", "true");
+      setTrainingUiActive(true);
+      return;
+    }
+    localStorage.removeItem("trainingUiActive");
+    setTrainingUiActive(false);
   };
 
   useEffect(() => {
@@ -111,16 +124,20 @@ export default function TrainingForEngineers() {
       let mlpProgressData = null;
 
       let sessionPayload = null;
-      if (trainingSessionId) {
+      if (supportsSessionApi && trainingSessionId) {
         const sessionRes = await fetch(`${BASE_URL}/training_session/${encodeURIComponent(trainingSessionId)}`);
-        if (sessionRes.ok) {
+        if (sessionRes.status === 404) {
+          setSupportsSessionApi(false);
+        } else if (sessionRes.ok) {
           sessionPayload = await sessionRes.json();
         }
       }
 
-      if (!sessionPayload) {
+      if (supportsSessionApi && !sessionPayload) {
         const activeRes = await fetch(`${BASE_URL}/training_session/active`);
-        if (activeRes.ok) {
+        if (activeRes.status === 404) {
+          setSupportsSessionApi(false);
+        } else if (activeRes.ok) {
           const activeData = await activeRes.json();
           if (activeData?.active && activeData?.session) {
             sessionPayload = activeData.session;
@@ -129,7 +146,7 @@ export default function TrainingForEngineers() {
         }
       }
 
-      if (sessionPayload) {
+      if (supportsSessionApi && sessionPayload) {
         xgbProgressData = sessionPayload.xgb || {};
         mlpProgressData = sessionPayload.mlp || {};
         xgbStatusData = sessionPayload.xgb || {};
@@ -191,6 +208,7 @@ export default function TrainingForEngineers() {
         setError("Training was cancelled. Re-upload your CSV to start again.");
         setXGBTrainingStatus("cancelled");
         setMlpTrainingStatus("cancelled");
+        setTrainingUiActiveFlag(false);
         setActiveTrainingSessionId(null);
         return;
       }
@@ -198,7 +216,7 @@ export default function TrainingForEngineers() {
       const anyInProgress = xgbStatus === "in_progress" || mlpStatus === "in_progress";
       const bothCompleted = xgbStatus === "completed" && mlpStatus === "completed";
 
-      if (anyInProgress) {
+      if (anyInProgress && (trainingUiActive || Boolean(trainingSessionId) || Boolean(sessionPayload))) {
         setIsTraining(true);
         setCurrentStep(1);
         setCurrentTrainingStage("Training in Progress...");
@@ -209,6 +227,7 @@ export default function TrainingForEngineers() {
         setCurrentStep(2);
         setXGBTrainingStatus("completed");
         setMlpTrainingStatus("completed");
+        setTrainingUiActiveFlag(false);
         setActiveTrainingSessionId(null);
       } else {
         setXGBTrainingStatus(xgbStatus === "not_started" ? "idle" : xgbStatus);
@@ -217,7 +236,7 @@ export default function TrainingForEngineers() {
     } catch (err) {
       console.error("Failed to sync training state from backend:", err);
     }
-  }, [trainingSessionId]);
+  }, [trainingSessionId, supportsSessionApi, trainingUiActive]);
 
   useEffect(() => {
     if (!BASE_URL) return;
@@ -351,6 +370,7 @@ export default function TrainingForEngineers() {
     setXGBTrainingStatus("idle");
     setXgbProgress(0);
     setMlpProgress(0);
+  setTrainingUiActiveFlag(true);
 
     const pollXGBTrainingStatus = () => {
       return new Promise((resolve, reject) => {
@@ -562,21 +582,27 @@ export default function TrainingForEngineers() {
 
     try {
       let activeSessionId = trainingSessionId;
-      if (!activeSessionId) {
+      if (supportsSessionApi && !activeSessionId) {
         const sessionRes = await fetch(`${BASE_URL}/training_session`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ speed_mode: speedMode }),
         });
-        if (!sessionRes.ok) {
+
+        if (sessionRes.status === 404) {
+          setSupportsSessionApi(false);
+        } else if (!sessionRes.ok) {
           throw new Error("Failed to create training session.");
+        } else {
+          const sessionData = await sessionRes.json();
+          activeSessionId = sessionData.training_id;
+          setActiveTrainingSessionId(activeSessionId);
         }
-        const sessionData = await sessionRes.json();
-        activeSessionId = sessionData.training_id;
-        setActiveTrainingSessionId(activeSessionId);
       }
 
-      formData.append("training_id", activeSessionId);
+      if (activeSessionId) {
+        formData.append("training_id", activeSessionId);
+      }
 
       await fetch(`${BASE_URL}/delete_old_metrics`, { method: "POST" });
 
@@ -650,7 +676,10 @@ export default function TrainingForEngineers() {
       await waitForXGBTrainingToStart();
       await pollXGBTrainingStatus();
 
-      const mlpResponse = await fetch(`${BASE_URL}/train_MLP_model?speed_mode=${encodeURIComponent(speedMode)}&training_id=${encodeURIComponent(activeSessionId)}`, { method: "POST" });
+      const mlpTrainingQuery = activeSessionId
+        ? `speed_mode=${encodeURIComponent(speedMode)}&training_id=${encodeURIComponent(activeSessionId)}`
+        : `speed_mode=${encodeURIComponent(speedMode)}`;
+      const mlpResponse = await fetch(`${BASE_URL}/train_MLP_model?${mlpTrainingQuery}`, { method: "POST" });
       if (!mlpResponse.ok) {
         throw new Error("Failed to start MLP training.");
       }
@@ -666,6 +695,7 @@ export default function TrainingForEngineers() {
         setIsTraining(false);
         setCurrentStep(0);
         setError("Training was cancelled. Re-upload your CSV to start again.");
+        setTrainingUiActiveFlag(false);
         setActiveTrainingSessionId(null);
         return;
       }
@@ -800,12 +830,24 @@ export default function TrainingForEngineers() {
 
     setResetting(true);
     try {
-      const response = await fetch(`${BASE_URL}/reset_training_state`, {
-        method: "POST",
-      });
+      let resetSucceeded = false;
 
-      if (!response.ok) {
-        throw new Error("Failed to reset training state");
+      if (supportsSessionApi) {
+        const response = await fetch(`${BASE_URL}/reset_training_state`, {
+          method: "POST",
+        });
+        if (response.status === 404) {
+          setSupportsSessionApi(false);
+        } else if (response.ok) {
+          resetSucceeded = true;
+        }
+      }
+
+      if (!resetSucceeded) {
+        await Promise.all([
+          fetch(`${BASE_URL}/delete_old_metrics`, { method: "POST" }),
+          fetch(`${BASE_URL}/cleanup_models`, { method: "POST" }),
+        ]);
       }
 
       setIsTraining(false);
@@ -821,6 +863,7 @@ export default function TrainingForEngineers() {
       setXgbProgress(0);
       setMlpProgress(0);
       setShowResetModal(false);
+  setTrainingUiActiveFlag(false);
       setActiveTrainingSessionId(null);
     } catch (err) {
       console.error("Reset training state failed:", err);
@@ -831,22 +874,31 @@ export default function TrainingForEngineers() {
   };
 
   const handleCancelTraining = async () => {
-    if (!trainingSessionId) {
-      setError("No active training session found.");
-      return;
-    }
-
     const confirmed = window.confirm("Cancel the current training run?");
     if (!confirmed) return;
 
     setResetting(true);
     try {
-      const response = await fetch(`${BASE_URL}/training_session/${encodeURIComponent(trainingSessionId)}/cancel`, {
-        method: "POST",
-      });
+      let cancelledOnBackend = false;
+      if (supportsSessionApi && trainingSessionId) {
+        const response = await fetch(`${BASE_URL}/training_session/${encodeURIComponent(trainingSessionId)}/cancel`, {
+          method: "POST",
+        });
 
-      if (!response.ok) {
-        throw new Error("Failed to cancel training");
+        if (response.status === 404) {
+          setSupportsSessionApi(false);
+        } else if (!response.ok) {
+          throw new Error("Failed to cancel training");
+        } else {
+          cancelledOnBackend = true;
+        }
+      }
+
+      if (!cancelledOnBackend) {
+        await Promise.all([
+          fetch(`${BASE_URL}/delete_old_metrics`, { method: "POST" }),
+          fetch(`${BASE_URL}/cleanup_models`, { method: "POST" }),
+        ]);
       }
 
       setIsTraining(false);
@@ -857,6 +909,7 @@ export default function TrainingForEngineers() {
       setMlpProgress(0);
       setXGBTrainingStatus("cancelled");
       setMlpTrainingStatus("cancelled");
+    setTrainingUiActiveFlag(false);
       setActiveTrainingSessionId(null);
       setError("Training was cancelled. Re-upload your CSV to start again.");
     } catch (err) {
@@ -868,7 +921,7 @@ export default function TrainingForEngineers() {
   };
 
   const navigateStep = (step) => {
-    if (step === 1 && !csvFile) {
+    if (step === 1 && !csvFile && !isTraining) {
       setError("Please upload a CSV file first.");
       return;
     }
@@ -940,6 +993,12 @@ export default function TrainingForEngineers() {
         )}
       </div>
     );
+  };
+
+  ProgressMetric.propTypes = {
+    label: PropTypes.string.isRequired,
+    value: PropTypes.oneOfType([PropTypes.string, PropTypes.number]).isRequired,
+    variant: PropTypes.string,
   };
 
   return (

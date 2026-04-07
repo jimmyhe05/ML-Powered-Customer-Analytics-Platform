@@ -20,6 +20,22 @@ const getAgeRangeColor = (value, maxValue) => {
 };
 
 const AgeRangeChart = ({ data }) => {
+  if (!Array.isArray(data) || data.length === 0) {
+    return (
+      <Card className="shadow-sm border-0 h-100">
+        <Card.Header className="bg-info bg-opacity-10 border-0 py-3">
+          <div className="d-flex justify-content-between align-items-center">
+            <h5 className="mb-0 text-info fw-semibold">Age Distribution Analysis</h5>
+            <Badge bg="info" className="px-3 py-2 fw-normal">Demographics</Badge>
+          </div>
+        </Card.Header>
+        <Card.Body className="p-4 text-center text-muted">
+          No age data available in uploaded dashboard dataset.
+        </Card.Body>
+      </Card>
+    );
+  }
+
   // Find maximum count for color scaling
   const maxCount = Math.max(...data.map((item) => item.count));
 
