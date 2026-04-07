@@ -61,6 +61,29 @@ def _empty_return_analysis():
         "responsible_party": []
     }
 
+
+def _normalize_column_name(col: str) -> str:
+    return (
+        str(col)
+        .lstrip('\ufeff')
+        .lower()
+        .strip()
+        .replace(" ", "_")
+        .replace("/", "_")
+        .replace("#", "num")
+        .replace("(", "")
+        .replace(")", "")
+        .replace("-", "_")
+        .replace(":", "_")
+    )
+
+
+def _normalize_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [_normalize_column_name(col) for col in df.columns]
+    keep_mask = [bool(col) and not str(col).startswith("unnamed") for col in df.columns]
+    return df.loc[:, keep_mask]
+
 # AI Model Paths
 MODEL_PATH = "best_churn_model.pkl" #Saved XGBoost Model
 MLP_MODEL_PATH = "MLP_churn_model.pt" #Saved MLP Model
@@ -425,15 +448,21 @@ def insert_predictions(df, upload_file, model_type):
         prediction_batch_id, device_number, churn_probability, customer_number
     ) VALUES (%s, %s, %s, %s);
     """
-    records = [
-        (
-            int(prediction_batch_id),
-            int(float(row["device number"])),
-            float(row["churn_probability"]),
-            int(row["customer_number"])
-        )
-        for _, row in df.iterrows()
-    ]
+    device_col = "device number" if "device number" in df.columns else ("device_number" if "device_number" in df.columns else None)
+    records = []
+    for _, row in df.iterrows():
+        try:
+            device_number = int(float(row[device_col])) if device_col else int(row.get("customer_number", 0))
+            records.append(
+                (
+                    int(prediction_batch_id),
+                    device_number,
+                    float(row["churn_probability"]),
+                    int(row["customer_number"]),
+                )
+            )
+        except Exception as row_err:
+            logger.warning(f"⚠️ Skipping malformed prediction row: {row_err}")
 
     execute_batch(cursor, insert_query, records)
     conn.commit()
@@ -460,15 +489,8 @@ def insert_or_update_devices(df, upload_file):
         """)
         existing_schema = {row[0]: row[1] for row in cursor.fetchall()}
 
-        # Process feature names
-        df.columns = [
-            col.lower()
-            .strip()
-            .replace(" ", "_")
-            .replace("#", "num")
-            .replace("/", "_")
-            for col in df.columns
-        ]
+        # Process feature names robustly and ignore empty unnamed columns
+        df = _normalize_dataframe_columns(df)
 
         # Ensure no remain NA values. 
         if 'churn' in df.columns:
@@ -567,11 +589,15 @@ def insert_or_update_devices(df, upload_file):
         df = df.where(pd.notnull(df), None)
 
         insert_columns = list(df.columns)
+        quoted_cols = ', '.join([f'"{col}"' for col in insert_columns])
+        update_clause = ', '.join([
+            f'"{col}" = EXCLUDED."{col}"' for col in insert_columns if col != 'device_number'
+        ])
         insert_query = f"""
-        INSERT INTO devices ({', '.join(insert_columns)})
+        INSERT INTO devices ({quoted_cols})
         VALUES ({', '.join(['%s'] * len(insert_columns))})
         ON CONFLICT (device_number) DO UPDATE SET
-        {', '.join([f'{col} = EXCLUDED.{col}' for col in insert_columns if col != 'device_number'])};
+        {update_clause};
         """
 
         execute_batch(cursor, insert_query, df[insert_columns].values.tolist())

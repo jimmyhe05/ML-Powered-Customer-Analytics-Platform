@@ -513,6 +513,11 @@ export default function TrainingForEngineers() {
               return;
             }
 
+            if (data.status === "error") {
+              reject(new Error(data.message || "XGBoost training failed to start."));
+              return;
+            }
+
             if (Date.now() - startTime > timeoutLimit) {
               reject(new Error("Timeout waiting for XGBoost training to start."));
               return;
@@ -546,6 +551,11 @@ export default function TrainingForEngineers() {
 
             if (data.status === "cancelled") {
               reject(new Error("cancelled"));
+              return;
+            }
+
+            if (data.status === "error") {
+              reject(new Error(data.message || "MLP training failed to start."));
               return;
             }
 
@@ -613,7 +623,14 @@ export default function TrainingForEngineers() {
         });
 
         if (!trainStartRes.ok) {
-          throw new Error("Failed to start XGBoost training.");
+          let backendMessage = "Failed to start XGBoost training.";
+          try {
+            const errData = await trainStartRes.json();
+            backendMessage = errData?.error || errData?.message || backendMessage;
+          } catch {
+            // Ignore JSON parse issues and keep default message.
+          }
+          throw new Error(backendMessage);
         }
 
         const trainStartData = await trainStartRes.json();
@@ -681,7 +698,14 @@ export default function TrainingForEngineers() {
         : `speed_mode=${encodeURIComponent(speedMode)}`;
       const mlpResponse = await fetch(`${BASE_URL}/train_MLP_model?${mlpTrainingQuery}`, { method: "POST" });
       if (!mlpResponse.ok) {
-        throw new Error("Failed to start MLP training.");
+        let backendMessage = "Failed to start MLP training.";
+        try {
+          const errData = await mlpResponse.json();
+          backendMessage = errData?.error || errData?.message || backendMessage;
+        } catch {
+          // Ignore JSON parse issues and keep default message.
+        }
+        throw new Error(backendMessage);
       }
 
       await waitForMLPTrainingToStart();
