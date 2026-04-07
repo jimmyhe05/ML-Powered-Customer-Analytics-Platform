@@ -20,17 +20,6 @@ Core outcomes:
 
 An end-to-end churn prediction platform built for Nuu Mobile. This repo contains a React dashboard and a Flask backend that together support CSV upload → data ingestion → feature processing → model training → batch prediction → analytics dashboards.
 
-Why this README update
------------------------
-This README reflects recent code hardening and feature work:
-
-- CSV ingestion normalization (robust header normalization and "unnamed" column dropping)
-- Safe DB upserts and quoted identifiers (prevents SQL syntax failures on messy uploads)
-- Alias support for common typos (for example `App Uage (s)` → `app_usage_seconds`)
-- Improved training UX (progress JSON tokens and clearer frontend error reporting)
-- Frontend resiliency for charting (tolerant month parsing and friendly empty states)
-
-These updates make the platform more resilient to messy, real-world uploads and easier to demo.
 
 Project summary
 ---------------
