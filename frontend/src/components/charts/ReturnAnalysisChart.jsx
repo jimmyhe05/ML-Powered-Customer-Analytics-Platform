@@ -15,7 +15,7 @@ import PropTypes from "prop-types";
 // Color generation function based on count
 const getReturnColor = (count, maxCount) => {
   // Calculate intensity based on the count relative to max
-  const intensity = count / maxCount;
+  const intensity = maxCount > 0 ? count / maxCount : 0;
 
   // Red-based spectrum for returns (higher returns = darker red)
   const hue = 0; // Red
@@ -68,7 +68,6 @@ const ReturnAnalysisChart = ({ data }) => {
   };
 
   const currentData = dataMapping[activeKey];
-
   // If no data available, show loading
   if (!data) {
     return (
@@ -90,10 +89,31 @@ const ReturnAnalysisChart = ({ data }) => {
     );
   }
 
+  // If the currently selected view has no records, show a friendly placeholder
+  if (!currentData || !Array.isArray(currentData.data) || currentData.data.length === 0) {
+    return (
+      <Card className="shadow-sm border-0 h-100">
+        <Card.Header className="bg-danger bg-opacity-10 border-0 py-3">
+          <div className="d-flex justify-content-between align-items-center">
+            <div>
+              <h5 className="mb-0 text-danger fw-semibold">{currentData?.title || "Return Analysis"}</h5>
+            </div>
+            <Badge bg="danger" className="px-3 py-2 fw-normal">
+              Returns
+            </Badge>
+          </div>
+        </Card.Header>
+        <Card.Body className="p-4">
+          <div className="text-center p-5 text-muted">No data available for this view</div>
+        </Card.Body>
+      </Card>
+    );
+  }
+
   // Find maximum count for color scaling in current data view
-  const maxCount = Math.max(
-    ...currentData.data.map((item) => item[currentData.yKey])
-  );
+  // Guard maxCount calculation when data exists but all counts are zero
+  const counts = currentData.data.map((item) => Number(item[currentData.yKey]) || 0);
+  const maxCount = counts.length > 0 ? Math.max(...counts) : 0;
 
   return (
     <Card className="shadow-sm border-0 h-100">
@@ -173,28 +193,23 @@ const ReturnAnalysisChart = ({ data }) => {
             <Tooltip
               content={({ active, payload, label }) => {
                 if (active && payload && payload.length) {
+                  const total = currentData.data.reduce(
+                    (sum, item) => sum + (Number(item[currentData.yKey]) || 0),
+                    0
+                  );
+                  const value = Number(payload[0].value) || 0;
+                  const share = total ? ((value / total) * 100).toFixed(1) : "0.0";
+
                   return (
                     <div className="custom-tooltip p-3 bg-white shadow-sm border rounded">
                       <p className="mb-2 fw-semibold">{label}</p>
                       <div className="d-flex justify-content-between align-items-center">
                         <span className="text-danger">Count:</span>
-                        <span className="fw-semibold">
-                          {payload[0].value.toLocaleString()}
-                        </span>
+                        <span className="fw-semibold">{value.toLocaleString()}</span>
                       </div>
                       <div className="d-flex justify-content-between align-items-center">
                         <span className="text-muted">Share:</span>
-                        <span className="fw-semibold">
-                          {(
-                            (payload[0].value /
-                              currentData.data.reduce(
-                                (sum, item) => sum + item[currentData.yKey],
-                                0
-                              )) *
-                            100
-                          ).toFixed(1)}
-                          %
-                        </span>
+                        <span className="fw-semibold">{share}%</span>
                       </div>
                     </div>
                   );
