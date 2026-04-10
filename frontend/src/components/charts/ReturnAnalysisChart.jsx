@@ -12,6 +12,17 @@ import {
 } from "recharts";
 import PropTypes from "prop-types";
 
+const normalizeDistribution = (rows, xKey) => {
+  if (!Array.isArray(rows)) return [];
+
+  return rows
+    .map((row) => ({
+      [xKey]: String(row?.[xKey] ?? "Unknown").trim() || "Unknown",
+      count: Number(row?.count) || 0,
+    }))
+    .filter((row) => Number.isFinite(row.count));
+};
+
 // Color generation function based on count
 const getReturnColor = (count, maxCount) => {
   // Calculate intensity based on the count relative to max
@@ -35,35 +46,35 @@ const ReturnAnalysisChart = ({ data }) => {
       description: "Distribution of return sources",
       xKey: "source",
       yKey: "count",
-      data: data?.source_distribution || [],
+      data: normalizeDistribution(data?.source_distribution, "source"),
     },
     defect_distribution: {
       title: "Defect Types",
       description: "Distribution of defect/damage types",
       xKey: "defect_type",
       yKey: "count",
-      data: data?.defect_distribution || [],
+      data: normalizeDistribution(data?.defect_distribution, "defect_type"),
     },
     warranty_status: {
       title: "Warranty Status",
       description: "Warranty status of returned devices",
       xKey: "warranty_status",
       yKey: "count",
-      data: data?.warranty_status || [],
+      data: normalizeDistribution(data?.warranty_status, "warranty_status"),
     },
     final_status: {
       title: "Final Status",
       description: "Final status of returned devices",
       xKey: "final_status",
       yKey: "count",
-      data: data?.final_status || [],
+      data: normalizeDistribution(data?.final_status, "final_status"),
     },
     responsible_party: {
       title: "Responsible Party",
       description: "Party responsible for returns",
       xKey: "responsible_party",
       yKey: "count",
-      data: data?.responsible_party || [],
+      data: normalizeDistribution(data?.responsible_party, "responsible_party"),
     },
   };
 

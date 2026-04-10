@@ -27,6 +27,32 @@ import {
 } from "../components/charts";
 import { formatFeatureName } from "../components/charts/utils";
 
+const emptyReturnAnalysis = {
+  source_distribution: [],
+  defect_distribution: [],
+  warranty_status: [],
+  final_status: [],
+  responsible_party: [],
+};
+
+const normalizeReturnAnalysisPayload = (payload) => ({
+  source_distribution: Array.isArray(payload?.source_distribution)
+    ? payload.source_distribution
+    : [],
+  defect_distribution: Array.isArray(payload?.defect_distribution)
+    ? payload.defect_distribution
+    : [],
+  warranty_status: Array.isArray(payload?.warranty_status)
+    ? payload.warranty_status
+    : [],
+  final_status: Array.isArray(payload?.final_status)
+    ? payload.final_status
+    : [],
+  responsible_party: Array.isArray(payload?.responsible_party)
+    ? payload.responsible_party
+    : [],
+});
+
 export default function Dashboard() {
   // Model type color scheme:
   // - XGBoost: primary (blue)
@@ -47,7 +73,7 @@ export default function Dashboard() {
     return stored ? parseInt(stored) : 50;
   });
   const [carrierData, setCarrierData] = useState([]);
-  const [returnData, setReturnData] = useState(null);
+  const [returnData, setReturnData] = useState(emptyReturnAnalysis);
   const [usageData, setUsageData] = useState(null);
   const [correlationData, setCorrelationData] = useState(null);
   const [mlpFeatureImportance, setMlpFeatureImportance] = useState([]);
@@ -142,7 +168,7 @@ export default function Dashboard() {
 
         fetch(`${BASE_URL}/return_analysis`)
           .then((res) => res.json())
-          .then((data) => setReturnData(data))
+          .then((data) => setReturnData(normalizeReturnAnalysisPayload(data)))
           .catch((err) => console.error("Error refreshing return analysis:", err));
 
         fetch(`${BASE_URL}/time_analysis`)
@@ -178,7 +204,7 @@ export default function Dashboard() {
         // Clear dashboard visualizations
         setDashboardData(null);
         setCarrierData([]);
-        setReturnData(null);
+  setReturnData(emptyReturnAnalysis);
         setUsageData(null);
         setCorrelationData([]);  // if you want to clear heatmap too
   setPage(0);
@@ -384,10 +410,11 @@ export default function Dashboard() {
     fetch(`${BASE_URL}/return_analysis`)
       .then((response) => response.json())
       .then((data) => {
-        setReturnData(data);
+        setReturnData(normalizeReturnAnalysisPayload(data));
       })
       .catch((error) => {
         console.error("Error fetching return analysis:", error);
+        setReturnData(emptyReturnAnalysis);
       });
 
     // Fetch time analysis data
