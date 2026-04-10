@@ -2314,55 +2314,88 @@ def carrier_distribution():
 @app.route('/return_analysis', methods=['GET'])
 def return_analysis():
     try:
-        #Connect to the database .
+        # Connect to the database.
         conn = psycopg2.connect(**DB_CONFIG)
         cursor = conn.cursor()
 
-        # Check if required columns exist
+        # Check available columns and normalize names for tolerant matching.
         cursor.execute("""
             SELECT column_name
             FROM information_schema.columns
             WHERE table_name = 'dashboard_devices';
         """)
-        existing_cols = {row[0] for row in cursor.fetchall()}
+        existing_cols = {_normalize_column_name(row[0]) for row in cursor.fetchall()}
 
-        required_cols = {'type', 'source', 'defect___damage_type', 'warranty', 'final_status', 'responsible_party'}
-        if not required_cols.issubset(existing_cols):
-            logger.warning("⚠️ Some required columns missing in dashboard_devices")
+        def _resolve_col(candidates):
+            return next((c for c in candidates if c in existing_cols), None)
+
+        type_col = _resolve_col(["type"])
+        source_col = _resolve_col(["source", "return_source"])
+        defect_col = _resolve_col([
+            "defect___damage_type",
+            "defect_damage_type",
+            "defect__damage_type",
+            "defect_type",
+            "damage_type",
+        ])
+        warranty_col = _resolve_col(["warranty", "warranty_status"])
+        final_status_col = _resolve_col(["final_status", "status"])
+        responsible_col = _resolve_col(["responsible_party", "responsible"])
+
+        if not type_col:
+            logger.warning("⚠️ Missing 'type' column in dashboard_devices for /return_analysis")
             conn.close()
             return jsonify(_empty_return_analysis())
             
         df = pd.read_sql("SELECT * FROM dashboard_devices", conn)
         conn.close()
+        df = _normalize_dataframe_columns(df)
 
-        #No data
+        # No data
         if df.empty:
             return jsonify(_empty_return_analysis())
 
-        #Format data for the frontend graph. 
-        returns_df = df[df['type'] == 'Return'].copy()
+        # Format data for the frontend graph with tolerant matching.
+        returns_df = df[
+            df[type_col]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .str.startswith('return')
+        ].copy()
 
-        source_counts = returns_df['source'].value_counts().reset_index()
-        source_counts.columns = ['source', 'count']
+        if returns_df.empty:
+            logger.info("ℹ️ /return_analysis found no return rows after filtering")
+            return jsonify(_empty_return_analysis())
 
-        defect_counts = returns_df['defect___damage_type'].value_counts().reset_index()
-        defect_counts.columns = ['defect_type', 'count']
+        def _distribution(frame, col_name, out_key):
+            if not col_name or col_name not in frame.columns:
+                return []
 
-        warranty_counts = returns_df['warranty'].value_counts().reset_index()
-        warranty_counts.columns = ['warranty_status', 'count']
+            values = (
+                frame[col_name]
+                .astype(str)
+                .str.strip()
+            )
 
-        final_status_counts = returns_df['final_status'].value_counts().reset_index()
-        final_status_counts.columns = ['final_status', 'count']
+            values = values[
+                (values != "")
+                & (~values.str.lower().isin(["nan", "none", "null"]))
+            ]
 
-        responsible_counts = returns_df['responsible_party'].value_counts().reset_index()
-        responsible_counts.columns = ['responsible_party', 'count']
+            if values.empty:
+                return []
+
+            counts = values.value_counts().reset_index()
+            counts.columns = [out_key, 'count']
+            return counts.to_dict(orient='records')
 
         return jsonify({
-            "source_distribution": source_counts.to_dict(orient='records'),
-            "defect_distribution": defect_counts.to_dict(orient='records'),
-            "warranty_status": warranty_counts.to_dict(orient='records'),
-            "final_status": final_status_counts.to_dict(orient='records'),
-            "responsible_party": responsible_counts.to_dict(orient='records')
+            "source_distribution": _distribution(returns_df, source_col, 'source'),
+            "defect_distribution": _distribution(returns_df, defect_col, 'defect_type'),
+            "warranty_status": _distribution(returns_df, warranty_col, 'warranty_status'),
+            "final_status": _distribution(returns_df, final_status_col, 'final_status'),
+            "responsible_party": _distribution(returns_df, responsible_col, 'responsible_party')
         })
 
     except psycopg2.OperationalError as e:
