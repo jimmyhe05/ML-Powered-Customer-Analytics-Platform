@@ -53,6 +53,45 @@ const normalizeReturnAnalysisPayload = (payload) => ({
     : [],
 });
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const transientStatuses = new Set([408, 429, 500, 502, 503, 504]);
+
+const apiFetch = async (url, options = {}, retryOptions = {}) => {
+  const {
+    retries = 3,
+    baseDelay = 1500,
+    retryStatuses = transientStatuses,
+  } = retryOptions;
+
+  let lastError;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      const response = await fetch(url, options);
+      if (!response.ok && retryStatuses.has(response.status) && attempt < retries) {
+        await sleep(baseDelay * (attempt + 1));
+        continue;
+      }
+      return response;
+    } catch (error) {
+      lastError = error;
+      if (attempt >= retries) {
+        throw error;
+      }
+      await sleep(baseDelay * (attempt + 1));
+    }
+  }
+  throw lastError || new Error("Request failed");
+};
+
+const apiJson = async (url, options = {}, retryOptions = {}) => {
+  const response = await apiFetch(url, options, retryOptions);
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`${url.split("/").pop()} failed (${response.status}): ${errorText.slice(0, 160)}`);
+  }
+  return response.json();
+};
+
 export default function Dashboard() {
   // Model type color scheme:
   // - XGBoost: primary (blue)
@@ -130,10 +169,10 @@ export default function Dashboard() {
       const formData = new FormData();
       formData.append("file", dashboardFile);
 
-      const response = await fetch(`${BASE_URL}/upload_dashboard_data`, {
+      const response = await apiFetch(`${BASE_URL}/upload_dashboard_data`, {
         method: "POST",
         body: formData,
-      });
+      }, { retries: 2, baseDelay: 2000 });
 
       if (response.ok) {
         alert("✅ Dashboard data uploaded successfully!");
@@ -143,8 +182,7 @@ export default function Dashboard() {
 
         // Refresh dashboard data
         setLoading(true);
-        fetch(`${BASE_URL}/dashboard_data`)
-          .then((res) => res.json())
+        apiJson(`${BASE_URL}/dashboard_data`)
           .then((data) => {
             if (data && Array.isArray(data.app_usage_percentages)) {
               data.app_usage_percentages.sort((a, b) => b.percentage - a.percentage);
@@ -161,18 +199,15 @@ export default function Dashboard() {
             setLoading(false);
           });
 
-        fetch(`${BASE_URL}/carrier_distribution`)
-          .then((res) => res.json())
+        apiJson(`${BASE_URL}/carrier_distribution`)
           .then((data) => setCarrierData(data.carrier_distribution || []))
           .catch((err) => console.error("Error refreshing carrier distribution:", err));
 
-        fetch(`${BASE_URL}/return_analysis`)
-          .then((res) => res.json())
+        apiJson(`${BASE_URL}/return_analysis`)
           .then((data) => setReturnData(normalizeReturnAnalysisPayload(data)))
           .catch((err) => console.error("Error refreshing return analysis:", err));
 
-        fetch(`${BASE_URL}/time_analysis`)
-          .then((res) => res.json())
+        apiJson(`${BASE_URL}/time_analysis`)
           .then((data) => setUsageData(data.usage_duration))
           .catch((err) => console.error("Error refreshing time analysis:", err));
       } else {
@@ -194,9 +229,9 @@ export default function Dashboard() {
     }
 
     try {
-      const response = await fetch(`${BASE_URL}/reset_dashboard_data`, {
+      const response = await apiFetch(`${BASE_URL}/reset_dashboard_data`, {
         method: "POST", // or "DELETE", depending on your backend
-      });
+      }, { retries: 2, baseDelay: 2000 });
 
       if (response.ok) {
         alert("✅ Dashboard data has been reset!");
@@ -211,8 +246,7 @@ export default function Dashboard() {
 
         setLoading(true);
         // Optionally re-fetch empty dashboard to refresh view
-        fetch(`${BASE_URL}/dashboard_data`)
-          .then((res) => res.json())
+        apiJson(`${BASE_URL}/dashboard_data`)
           .then((data) => {
             setDashboardData(data || null);
             setLoading(false);
@@ -248,8 +282,7 @@ export default function Dashboard() {
       return;
     }
     // Fetch latest predictions
-    fetch(`${BASE_URL}/predictions?limit=5`)
-      .then((res) => res.json())
+    apiJson(`${BASE_URL}/predictions?limit=5`)
       .then((data) => {
         const parsed = Object.values(data).map((item, index) => {
           const predictionsArray = Array.isArray(item.predictions)
@@ -290,14 +323,7 @@ export default function Dashboard() {
 
     // Fetch Dashboard Data
     console.log(`${BASE_URL}/dashboard_data`);
-    fetch(`${BASE_URL}/dashboard_data`)
-      .then(async (response) => {
-        if (!response.ok) {
-          const errorText = await response.text();
-          throw new Error(`dashboard_data failed (${response.status}): ${errorText.slice(0, 120)}`);
-        }
-        return response.json();
-      })
+    apiJson(`${BASE_URL}/dashboard_data`, {}, { retries: 4, baseDelay: 2000 })
       .then((data) => {
         if (!data || !Array.isArray(data.app_usage_percentages)) {
           throw new Error(data?.error || "Invalid dashboard_data response");
@@ -314,23 +340,14 @@ export default function Dashboard() {
 
     // Check if models exist before fetching feature importance
     Promise.all([
-      fetch(`${BASE_URL}/check_model`),
-      fetch(`${BASE_URL}/check_MLP_model`),
+      apiJson(`${BASE_URL}/check_model`),
+      apiJson(`${BASE_URL}/check_MLP_model`),
     ])
-      .then(([xgbResponse, mlpResponse]) =>
-        Promise.all([xgbResponse.json(), mlpResponse.json()])
-      )
       .then(([xgbData, mlpData]) => {
         console.log("Model check results:", { xgbData, mlpData });
 
         if (xgbData.model_exists) {
-          fetch(`${BASE_URL}/feature_importance`)
-            .then((response) => {
-              if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-              }
-              return response.json();
-            })
+          apiJson(`${BASE_URL}/feature_importance`)
             .then((data) => {
               console.log("XGBoost feature importance data:", data);
               if (data && data.feature_importance) {
@@ -356,13 +373,7 @@ export default function Dashboard() {
             });
         }
         if (mlpData.model_exists) {
-          fetch(`${BASE_URL}/feature_importance_MLP`)
-            .then((response) => {
-              if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-              }
-              return response.json();
-            })
+          apiJson(`${BASE_URL}/feature_importance_MLP`)
             .then((data) => {
               console.log("MLP feature importance data:", data);
               if (data && data.feature_importance) {
@@ -392,23 +403,17 @@ export default function Dashboard() {
     // Fetch carrier distribution data
     const fetchCarrierDistribution = async () => {
       try {
-        const response = await fetch(`${BASE_URL}/carrier_distribution`);
-        if (!response.ok) {
-          throw new Error("Failed to fetch carrier distribution data");
-        }
-        const data = await response.json();
+        const data = await apiJson(`${BASE_URL}/carrier_distribution`);
         setCarrierData(data.carrier_distribution || []);
       } catch (err) {
         console.error("Error fetching carrier distribution:", err);
-        setError(err.message);
       }
     };
 
     fetchCarrierDistribution();
 
     // Fetch return analysis data
-    fetch(`${BASE_URL}/return_analysis`)
-      .then((response) => response.json())
+    apiJson(`${BASE_URL}/return_analysis`)
       .then((data) => {
         setReturnData(normalizeReturnAnalysisPayload(data));
       })
@@ -418,8 +423,7 @@ export default function Dashboard() {
       });
 
     // Fetch time analysis data
-    fetch(`${BASE_URL}/time_analysis`)
-      .then((response) => response.json())
+    apiJson(`${BASE_URL}/time_analysis`)
       .then((data) => {
         setUsageData(data.usage_duration);
       })
@@ -427,13 +431,7 @@ export default function Dashboard() {
         console.error("Error fetching time analysis:", error);
       });
     // Add new fetch for correlation data
-    fetch(`${BASE_URL}/feature_heatmap_data`)
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`);
-        }
-        return response.json();
-      })
+    apiJson(`${BASE_URL}/feature_heatmap_data`)
       .then((data) => {
         if (Array.isArray(data) && data.length > 0) {
           setCorrelationData(data);
@@ -487,10 +485,10 @@ export default function Dashboard() {
           ? `${BASE_URL}/predict_batch`
           : `${BASE_URL}/predict_batch_MLP`;
 
-      const response = await fetch(endpoint, {
+      const response = await apiFetch(endpoint, {
         method: "POST",
         body: formData,
-      });
+      }, { retries: 1, baseDelay: 2500 });
 
       const data = await response.json();
 
@@ -550,7 +548,7 @@ export default function Dashboard() {
   const handleRemovePrediction = async (batchId) => {
     try {
       console.log(batchId);
-      const response = await fetch(
+      const response = await apiFetch(
         `${BASE_URL}/delete_prediction_batch/${batchId}`,
         {
           method: "DELETE",
@@ -590,11 +588,7 @@ export default function Dashboard() {
   const fetchAllPredictions = async () => {
     setIsLoadingAllPredictions(true);
     try {
-      const response = await fetch(`${BASE_URL}/predictions?limit=100`);
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      const data = await response.json();
+      const data = await apiJson(`${BASE_URL}/predictions?limit=100`);
 
       const parsed = Object.values(data).map((item, index) => {
         const predictionsArray = Array.isArray(item.predictions)
@@ -652,7 +646,7 @@ export default function Dashboard() {
       )
     ) {
       try {
-        const response = await fetch(`${BASE_URL}/delete_all_predictions`, {
+        const response = await apiFetch(`${BASE_URL}/delete_all_predictions`, {
           method: "DELETE",
         });
 

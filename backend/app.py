@@ -14,7 +14,7 @@ import subprocess
 import psycopg2
 from psycopg2.extras import execute_batch
 from datetime import datetime
-from sqlalchemy import create_engine
+from sqlalchemy import URL, create_engine
 import re
 import torch
 import subprocess
@@ -131,6 +131,12 @@ def _normalize_column_name(col: str) -> str:
         "return_status": "final_status",
         "status": "final_status",
         "return_source": "source",
+        "return_origin": "source",
+        "return_channel": "source",
+        "return_reason": "source",
+        "origin": "source",
+        "channel": "source",
+        "reason": "source",
         "damage": "defect_damage_type",
         "defect_type": "defect_damage_type",
         "damage_type": "defect_damage_type",
@@ -193,8 +199,14 @@ TRAINING_SESSION_FILE = "active_training_session.json"
 ACTIVE_TRAINING_PROCESSES = {}
 ACTIVE_PROCESSES_LOCK = threading.Lock()
 
-engine = create_engine(
-    f'postgresql://{DB_CONFIG["user"]}:{DB_CONFIG["password"]}@{DB_CONFIG["host"]}:{DB_CONFIG["port"]}/{DB_CONFIG["dbname"]}')
+engine = create_engine(URL.create(
+    "postgresql+psycopg2",
+    username=DB_CONFIG["user"],
+    password=DB_CONFIG["password"],
+    host=DB_CONFIG["host"],
+    port=int(DB_CONFIG["port"]),
+    database=DB_CONFIG["dbname"],
+))
 
 
 def normalize_speed_mode(value: str) -> str:
@@ -1979,6 +1991,25 @@ def _first_existing_column(df: pd.DataFrame, candidates: List[str]) -> str | Non
     return None
 
 
+def _clean_label_series(series: pd.Series) -> pd.Series:
+    values = series.astype(str).str.strip()
+    invalid_values = {"", "nan", "nat", "none", "null", "unknown"}
+    return values[~values.str.lower().isin(invalid_values)]
+
+
+def _distribution_records(frame: pd.DataFrame, col_name: str | None, out_key: str) -> List[Dict[str, Any]]:
+    if not col_name or col_name not in frame.columns:
+        return []
+
+    values = _clean_label_series(frame[col_name])
+    if values.empty:
+        return []
+
+    counts = values.value_counts().reset_index()
+    counts.columns = [out_key, 'count']
+    return counts.to_dict(orient='records')
+
+
 def _format_month_label(value: str) -> str:
     try:
         dt = pd.to_datetime(value, errors='coerce')
@@ -2018,12 +2049,13 @@ def get_dashboard_data():
 
         # No data
         if not table_exists:
+            cursor.close()
             conn.close()
             return jsonify(_empty_dashboard_metrics())
 
-        # Query
-        df = pd.read_sql("SELECT * FROM dashboard_devices", conn)
+        cursor.close()
         conn.close()
+        df = pd.read_sql("SELECT * FROM dashboard_devices", engine)
 
         # No data
         if df.empty:
@@ -2048,12 +2080,8 @@ def get_dashboard_data():
             df['churn'] = pd.to_numeric(df['churn'], errors='coerce').fillna(0).astype(int)
             df['churn_month'] = df[churn_date_col].dt.to_period("M").astype(str)
 
-            churn_counts = (
-                df[df['churn'] == 1]['churn_month']
-                .value_counts()
-                .sort_index()
-                .items()
-            )
+            churn_months = _clean_label_series(df[df['churn'] == 1]['churn_month'])
+            churn_counts = churn_months.value_counts().sort_index().items()
 
             dashboard_metrics["churn_counts_per_month"] = [
                 {
@@ -2073,7 +2101,7 @@ def get_dashboard_data():
                 labels = ["0-17", "18-24", "25-34", "35-44", "45-54", "55-64", "65+"]
                 series = pd.cut(numeric_age, bins=bins, labels=labels, right=False)
             else:
-                series = df[age_col].astype(str).replace("nan", "Unknown").fillna("Unknown")
+                series = _clean_label_series(df[age_col])
 
             # If selected age column still yielded no meaningful values, fallback to DOB/birth columns
             if series.dropna().empty or (series.astype(str).str.strip() == "").all():
@@ -2095,12 +2123,7 @@ def get_dashboard_data():
                 age_col = birth_col
 
         if age_col:
-            age_counts = (
-                series
-                .value_counts()
-                .sort_index()
-                .items()
-            )
+            age_counts = _clean_label_series(series).value_counts().sort_index().items()
 
             dashboard_metrics["age_range_counts"] = [
                 {
@@ -2116,9 +2139,9 @@ def get_dashboard_data():
         if activation_col:
             parsed_dates = pd.to_datetime(df[activation_col], errors='coerce')
             if parsed_dates.notna().any():
-                activation_month = parsed_dates.dt.to_period("M").astype(str)
+                activation_month = _clean_label_series(parsed_dates.dt.to_period("M").astype(str))
             else:
-                activation_month = df[activation_col].astype(str)
+                activation_month = _clean_label_series(df[activation_col])
 
             activation_counts_raw = activation_month.value_counts().sort_index()
             activation_counts = []
@@ -2305,6 +2328,8 @@ def normalize_carrier_name(carrier_name):
         return None
 
     name = carrier_name.lower().strip()
+    if name in {"", "nan", "nat", "none", "null", "unknown"}:
+        return None
 
     # T-Mobile variations (including emergency calls)
     if "t-mobile" in name or "tmobile" in name:
@@ -2351,11 +2376,13 @@ def carrier_distribution():
         )
         if not carrier_col:
             logger.warning("⚠️ No carrier column found in dashboard_devices")
+            cursor.close()
             conn.close()
             return jsonify({"carrier_distribution": []})
 
-        df = pd.read_sql("SELECT * FROM dashboard_devices", conn)
+        cursor.close()
         conn.close()
+        df = pd.read_sql("SELECT * FROM dashboard_devices", engine)
         df = _normalize_dataframe_columns(df)
 
         # No data
@@ -2427,7 +2454,16 @@ def return_analysis():
             return next((c for c in candidates if c in existing_cols), None)
 
         type_col = _resolve_col(["type"])
-        source_col = _resolve_col(["source", "return_source"])
+        source_col = _resolve_col([
+            "source",
+            "return_source",
+            "return_origin",
+            "origin",
+            "channel",
+            "return_channel",
+            "return_reason",
+            "reason",
+        ])
         defect_col = _resolve_col([
             "defect___damage_type",
             "defect_damage_type",
@@ -2441,11 +2477,13 @@ def return_analysis():
 
         if not type_col:
             logger.warning("⚠️ Missing 'type' column in dashboard_devices for /return_analysis")
+            cursor.close()
             conn.close()
             return jsonify(_empty_return_analysis())
             
-        df = pd.read_sql("SELECT * FROM dashboard_devices", conn)
+        cursor.close()
         conn.close()
+        df = pd.read_sql("SELECT * FROM dashboard_devices", engine)
         df = _normalize_dataframe_columns(df)
 
         # No data
@@ -2465,34 +2503,12 @@ def return_analysis():
             logger.info("ℹ️ /return_analysis found no return rows after filtering")
             return jsonify(_empty_return_analysis())
 
-        def _distribution(frame, col_name, out_key):
-            if not col_name or col_name not in frame.columns:
-                return []
-
-            values = (
-                frame[col_name]
-                .astype(str)
-                .str.strip()
-            )
-
-            values = values[
-                (values != "")
-                & (~values.str.lower().isin(["nan", "none", "null"]))
-            ]
-
-            if values.empty:
-                return []
-
-            counts = values.value_counts().reset_index()
-            counts.columns = [out_key, 'count']
-            return counts.to_dict(orient='records')
-
         return jsonify({
-            "source_distribution": _distribution(returns_df, source_col, 'source'),
-            "defect_distribution": _distribution(returns_df, defect_col, 'defect_type'),
-            "warranty_status": _distribution(returns_df, warranty_col, 'warranty_status'),
-            "final_status": _distribution(returns_df, final_status_col, 'final_status'),
-            "responsible_party": _distribution(returns_df, responsible_col, 'responsible_party')
+            "source_distribution": _distribution_records(returns_df, source_col, 'source'),
+            "defect_distribution": _distribution_records(returns_df, defect_col, 'defect_type'),
+            "warranty_status": _distribution_records(returns_df, warranty_col, 'warranty_status'),
+            "final_status": _distribution_records(returns_df, final_status_col, 'final_status'),
+            "responsible_party": _distribution_records(returns_df, responsible_col, 'responsible_party')
         })
 
     except psycopg2.OperationalError as e:
@@ -2524,11 +2540,13 @@ def time_analysis():
         active_col = _first_existing_column(pd.DataFrame(columns=list(existing_cols)), ["active_date", "activation_date"])
         if not interval_col or not last_boot_col or not active_col:
             logger.warning("⚠️ Some required usage duration columns missing in dashboard_devices")
+            cursor.close()
             conn.close()
             return jsonify({"usage_duration": []})
 
-        df = pd.read_sql("SELECT * FROM dashboard_devices", conn)
+        cursor.close()
         conn.close()
+        df = pd.read_sql("SELECT * FROM dashboard_devices", engine)
         df = _normalize_dataframe_columns(df)
 
         #No data
