@@ -1,5 +1,5 @@
 import os
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 def get_env():
     return os.getenv("ENVIRONMENT", "local").lower()
@@ -25,8 +25,8 @@ def get_db_config():
         parsed = urlparse(normalized)
         return {
             "dbname": parsed.path.lstrip("/") or os.getenv("DB_NAME", "churn_prediction"),
-            "user": parsed.username or os.getenv("DB_USER", "postgres"),
-            "password": parsed.password or os.getenv("DB_PASS", "postgres"),
+            "user": unquote(parsed.username) if parsed.username else os.getenv("DB_USER", "postgres"),
+            "password": unquote(parsed.password) if parsed.password else os.getenv("DB_PASS", "postgres"),
             "host": parsed.hostname or os.getenv("DB_HOST", "localhost"),
             "port": str(parsed.port or os.getenv("DB_PORT", "5432")),
         }
