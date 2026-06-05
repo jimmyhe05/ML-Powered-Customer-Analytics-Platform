@@ -36,6 +36,22 @@ app = Flask(__name__)
 # CORS(app, origins=["http://localhost:4173", "http://127.0.0.1:4173"]) #For LocalHost Development
 CORS(app, resources={r"/*": {"origins": "*"}})
 
+
+# Fallback: ensure CORS headers are present on all responses.
+# This protects against cases where the Flask-CORS extension might not be active
+# in a deployed environment (reverse proxy removal, misconfiguration, etc.).
+@app.after_request
+def _ensure_cors_headers(response):
+    # Allow any origin (frontend is public). For stricter security, replace '*' with the
+    # specific frontend origin(s) such as 'https://ml-powered-customer-analytics-platf.vercel.app'
+    response.headers['Access-Control-Allow-Origin'] = response.headers.get(
+        'Access-Control-Allow-Origin', '*')
+    response.headers['Access-Control-Allow-Methods'] = response.headers.get(
+        'Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+    response.headers['Access-Control-Allow-Headers'] = response.headers.get(
+        'Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    return response
+
 # Configure logging for terminal debugging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
