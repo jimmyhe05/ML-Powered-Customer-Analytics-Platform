@@ -31,6 +31,12 @@ def get_db_config():
             "port": str(parsed.port or os.getenv("DB_PORT", "5432")),
         }
 
+    if get_env() == "production":
+        raise RuntimeError(
+            "DATABASE_URL is required when ENVIRONMENT=production. "
+            "Set it to your Supabase Session Pooler connection string in the hosting provider."
+        )
+
     return {
         "dbname": os.getenv("DB_NAME", "churn_prediction"),
         "user": os.getenv("DB_USER", "postgres"),
