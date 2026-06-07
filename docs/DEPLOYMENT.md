@@ -27,7 +27,7 @@ This guide deploys the app using a free/low-cost split architecture:
 - Build command:
   - `pip install --upgrade pip && pip install -r requirements.txt`
 - Start command:
-  - `gunicorn -w 2 -t 600 -b 0.0.0.0:$PORT app:app`
+  - `gunicorn -w ${WEB_CONCURRENCY:-1} -t ${GUNICORN_TIMEOUT:-600} -b 0.0.0.0:$PORT app:app`
 
 ### Required environment variables
 
@@ -40,6 +40,7 @@ Set these in Render service settings:
 - `DB_USER=<your_db_user>`
 - `DB_PASS=<your_db_password>`
 - `DB_ROW_LIMIT=10000`
+- `WEB_CONCURRENCY=1`
 - `XGB_TOTAL_TRIALS=10`
 - `MLP_TOTAL_EPOCHS=50`
 
