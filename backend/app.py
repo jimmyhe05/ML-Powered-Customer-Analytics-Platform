@@ -1,4 +1,3 @@
-from MLP1 import ChurnDataset, ChurnMLP
 from collections import OrderedDict
 import numpy as np
 import json
@@ -24,6 +23,7 @@ from typing import Dict, List, Any
 import time
 import uuid
 from config import get_db_config, get_row_limit
+from mlp_model import ChurnMLP
 
 # Flask App - Provides REST APIs for communication between the backend, Database, and Frontend React App.
 
@@ -460,7 +460,7 @@ def load_MLP_model():
         features = json.load(f)
 
     model = ChurnMLP(num_numeric_features=len(features))
-    model.load_state_dict(torch.load(MLP_MODEL_PATH))
+    model.load_state_dict(torch.load(MLP_MODEL_PATH, map_location="cpu"))
     model.eval()
 
     logging.info("✅ MLP model loaded successfully!")
@@ -1021,7 +1021,9 @@ def predict_batch():
     
     # XGBoost not yet trained.
     if model is None:
-        return jsonify({"error": "⚠ No trained model found. Please call /train_MLP_model first."}), 500
+        return jsonify({
+            "error": "No trained XGBoost model found. Train XGBoost first or select a deployed model."
+        }), 409
     try:
         # Process dataset for model specifications
         file = request.files['file']
@@ -1098,7 +1100,9 @@ def predict_batch_MLP():
     
     # No model - cannot predict.
     if MLP_model is None:
-        return jsonify({"error": "⚠ No trained MLP model found. Please call /train_MLP_model first."}), 500
+        return jsonify({
+            "error": "No trained MLP model found. Train the MLP model first or select a deployed model."
+        }), 409
     try:
         # Process data to ensure expected format. 
         file = request.files['file']

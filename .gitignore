@@ -93,6 +93,9 @@ MLP_training_*
 tracked_features*
 trained_features*
 XGB_training_*
+!backend/MLP_churn_model.pt
+!backend/MLP_metrics.json
+!backend/trained_features_MLP.json
 
 # Local-only career/resume notes
 docs/RESUME.md

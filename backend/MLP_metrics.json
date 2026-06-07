@@ -1,0 +1,1 @@
+{"churner_precision": 0.52, "churner_recall": 0.7027, "nonchurner_precision": 0.9843, "nonchurner_recall": 0.9663, "macro_avg_precision": 0.7521, "macro_avg_recall": 0.8345, "weighted_avg_precision": 0.9613, "weighted_avg_recall": 0.9533, "accuracy": 0.9533, "F2_score": 0.6566, "model_name": "MLP"}

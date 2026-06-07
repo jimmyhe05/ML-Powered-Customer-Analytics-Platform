@@ -119,6 +119,10 @@ export default function Dashboard() {
   const [error, setError] = useState(null);
   const dashboardTitleRef = useRef(null);
   const [modelTrained, setModelTrained] = useState(false);
+  const [modelAvailability, setModelAvailability] = useState({
+    xgboost: false,
+    mlp: false,
+  });
   const [allPredictions, setAllPredictions] = useState([]);
   const [isLoadingAllPredictions, setIsLoadingAllPredictions] = useState(false);
   const [showAllPredictionsModal, setShowAllPredictionsModal] = useState(false);
@@ -345,6 +349,18 @@ export default function Dashboard() {
     ])
       .then(([xgbData, mlpData]) => {
         console.log("Model check results:", { xgbData, mlpData });
+        const availability = {
+          xgboost: Boolean(xgbData.model_exists),
+          mlp: Boolean(mlpData.model_exists),
+        };
+        setModelAvailability(availability);
+        if (!availability[selectedModel]) {
+          if (availability.xgboost) {
+            setSelectedModel("xgboost");
+          } else if (availability.mlp) {
+            setSelectedModel("mlp");
+          }
+        }
 
         if (xgbData.model_exists) {
           apiJson(`${BASE_URL}/feature_importance`)
@@ -472,6 +488,11 @@ export default function Dashboard() {
   // Handle Prediction Generation & Redirect
   const handleGenerateNewPrediction = async () => {
     if (!selectedFile) return;
+    if (!modelAvailability[selectedModel]) {
+      const modelName = selectedModel === "xgboost" ? "XGBoost" : "MLP";
+      alert(`${modelName} is not trained on the deployed backend yet. Train it first from the Training page, then generate predictions.`);
+      return;
+    }
 
     setIsProcessing(true);
 
@@ -534,11 +555,12 @@ export default function Dashboard() {
           state: { predictions: data.predictions, modelType: selectedModel },
         });
       } else {
-        alert("Error generating predictions.");
+        const message = data?.error || "Error generating predictions.";
+        alert(message);
       }
     } catch (error) {
       console.error("Prediction error:", error);
-      alert("Failed to generate predictions.");
+      alert(error.message || "Failed to generate predictions.");
     } finally {
       setIsProcessing(false);
     }
@@ -1297,9 +1319,18 @@ export default function Dashboard() {
                   boxShadow: "0 2px 4px rgba(0,0,0,0.05)",
                 }}
               >
-                <option value="xgboost">XGBoost Model</option>
-                <option value="mlp">MLP Model</option>
+                <option value="xgboost" disabled={!modelAvailability.xgboost}>
+                  XGBoost Model{modelAvailability.xgboost ? "" : " (train first)"}
+                </option>
+                <option value="mlp" disabled={!modelAvailability.mlp}>
+                  MLP Model{modelAvailability.mlp ? "" : " (train first)"}
+                </option>
               </select>
+              {!modelAvailability.xgboost && !modelAvailability.mlp && (
+                <div className="text-danger small mt-2">
+                  No trained model is available on the deployed backend. Train a model first from the Training page.
+                </div>
+              )}
             </div>
 
             <div
@@ -1400,7 +1431,7 @@ export default function Dashboard() {
             <Button
               variant="primary"
               onClick={handleGenerateNewPrediction}
-              disabled={!selectedFile || isProcessing}
+              disabled={!selectedFile || isProcessing || !modelAvailability[selectedModel]}
               className="px-4"
               style={{
                 borderRadius: "8px",
