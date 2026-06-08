@@ -48,6 +48,7 @@ export default function TrainingForEngineers() {
   // });
   const [currentStep, setCurrentStep] = useState(0);
   const [trainingMode, setTrainingMode] = useState("incremental");
+  const [trainingTarget, setTrainingTarget] = useState(() => localStorage.getItem("trainingTarget") || "mlp");
   const [speedMode, setSpeedMode] = useState("fast");
   const [forceScratchTraining, setForceScratchTraining] = useState(false);
   const [serverStatus, setServerStatus] = useState({
@@ -84,6 +85,11 @@ export default function TrainingForEngineers() {
     }
     localStorage.removeItem("trainingUiActive");
     setTrainingUiActive(false);
+  };
+
+  const setTrainingTargetPreference = (target) => {
+    localStorage.setItem("trainingTarget", target);
+    setTrainingTarget(target);
   };
 
   useEffect(() => {
@@ -219,8 +225,11 @@ export default function TrainingForEngineers() {
         return;
       }
 
+      const activeTrainingTarget = localStorage.getItem("trainingTarget") || trainingTarget;
       const anyInProgress = xgbStatus === "in_progress" || mlpStatus === "in_progress";
-      const bothCompleted = xgbStatus === "completed" && mlpStatus === "completed";
+      const targetCompleted = activeTrainingTarget === "mlp"
+        ? mlpStatus === "completed"
+        : xgbStatus === "completed" && mlpStatus === "completed";
 
       if (anyInProgress && (trainingUiActive || Boolean(trainingSessionId) || Boolean(sessionPayload))) {
         setIsTraining(true);
@@ -228,10 +237,10 @@ export default function TrainingForEngineers() {
         setCurrentTrainingStage("Training in Progress...");
       }
 
-      if (bothCompleted) {
+      if (targetCompleted) {
         setIsTraining(false);
         setCurrentStep(2);
-        setXGBTrainingStatus("completed");
+        setXGBTrainingStatus(activeTrainingTarget === "mlp" ? "idle" : "completed");
         setMlpTrainingStatus("completed");
         setTrainingUiActiveFlag(false);
         setActiveTrainingSessionId(null);
@@ -242,7 +251,7 @@ export default function TrainingForEngineers() {
     } catch (err) {
       console.error("Failed to sync training state from backend:", err);
     }
-  }, [trainingSessionId, supportsSessionApi, trainingUiActive]);
+  }, [trainingSessionId, supportsSessionApi, trainingUiActive, trainingTarget]);
 
   useEffect(() => {
     if (!BASE_URL) return;
@@ -376,7 +385,8 @@ export default function TrainingForEngineers() {
     setXGBTrainingStatus("idle");
     setXgbProgress(0);
     setMlpProgress(0);
-  setTrainingUiActiveFlag(true);
+    localStorage.setItem("trainingTarget", trainingTarget);
+    setTrainingUiActiveFlag(true);
 
     const pollXGBTrainingStatus = () => {
       return new Promise((resolve, reject) => {
@@ -439,62 +449,65 @@ export default function TrainingForEngineers() {
     };
 
 
-    const pollMLPTrainingStatus = async () => {
-      try {
+    const pollMLPTrainingStatus = () => {
+      return new Promise((resolve, reject) => {
         const pollInterval = 2000; // ms
         const timeoutLimit = 600000; // 10 min
         const startTime = Date.now();
 
-        let mlpStartDetected = false;
-
         const checkStatus = async () => {
-          const res = await fetch(`${BASE_URL}/training_status_MLP`);
-          const data = await res.json();
+          try {
+            const res = await fetch(`${BASE_URL}/training_status_MLP`);
+            const data = await res.json();
 
-          const progressRes = await fetch(`${BASE_URL}/training_progress_MLP`);
-          const progressData = await progressRes.json();
+            const progressRes = await fetch(`${BASE_URL}/training_progress_MLP`);
+            const progressData = await progressRes.json();
 
-          console.log("🔄 Polling MLP Status:", data);
+            console.log("🔄 Polling MLP Status:", data);
 
-          if (progressData && typeof progressData.current_epoch === "number") {
-            const { current_epoch, total_epochs } = progressData;
-            const progress = total_epochs > 0
-              ? Math.floor((current_epoch / total_epochs) * 100)
-              : 0;
-            setMlpProgress(progress);
-          }
+            if (progressData && typeof progressData.current_epoch === "number") {
+              const { current_epoch, total_epochs } = progressData;
+              const progress = total_epochs > 0
+                ? Math.floor((current_epoch / total_epochs) * 100)
+                : 0;
+              setMlpProgress(progress);
+            }
 
-          if (data.status === "in_progress") {
-            mlpStartDetected = true;
-            setMlpTrainingStatus("in_progress");
-          }
+            if (data.status === "in_progress") {
+              setMlpTrainingStatus("in_progress");
+            }
 
-          if (data.status === "completed" && mlpStartDetected) {
-            setMlpProgress(100);
-            setMlpAccuracy(data.metrics);
-            setMlpTrainingStatus(data.status);
-            return;
-          } else if (data.status === "cancelled") {
-            setError("Training was cancelled.");
-            return;
-          } else if (data.status === "error") {
-            setError("MLP Training failed.");
-            setErrorDetails(data.message);
-            return;
-          }
+            if (data.status === "completed") {
+              setMlpProgress(100);
+              setMlpAccuracy(data.metrics);
+              setMlpTrainingStatus(data.status);
+              resolve();
+              return;
+            } else if (data.status === "cancelled") {
+              setError("Training was cancelled.");
+              reject(new Error("cancelled"));
+              return;
+            } else if (data.status === "error") {
+              setError("MLP Training failed.");
+              setErrorDetails(data.message);
+              reject(new Error(data.message || "MLP training failed."));
+              return;
+            }
 
-          if (Date.now() - startTime < timeoutLimit) {
-            setTimeout(checkStatus, pollInterval);
-          } else {
-            setError("MLP training timed out.");
+            if (Date.now() - startTime < timeoutLimit) {
+              setTimeout(checkStatus, pollInterval);
+            } else {
+              setError("MLP training timed out.");
+              reject(new Error("timeout"));
+            }
+          } catch (err) {
+            setError("Failed to poll MLP training status.");
+            reject(err);
           }
         };
 
         checkStatus();
-      } catch (err) {
-        setError("Failed to poll MLP training status.");
-        console.error(err);
-      }
+      });
     };
 
 
@@ -509,7 +522,7 @@ export default function TrainingForEngineers() {
             const res = await fetch(`${BASE_URL}/training_status_XGB`);
             const data = await res.json();
 
-            if (data.status === "in_progress") {
+            if (data.status === "in_progress" || data.status === "completed") {
               resolve();
               return;
             }
@@ -550,7 +563,7 @@ export default function TrainingForEngineers() {
             const res = await fetch(`${BASE_URL}/training_status_MLP`);
             const data = await res.json();
 
-            if (data.status === "in_progress") {
+            if (data.status === "in_progress" || data.status === "completed") {
               resolve();
               return;
             }
@@ -622,32 +635,38 @@ export default function TrainingForEngineers() {
 
       await fetch(`${BASE_URL}/delete_old_metrics`, { method: "POST" });
 
-      try {
-        const trainStartRes = await fetch(`${BASE_URL}/train_model`, {
-          method: "POST",
-          body: formData,
-        });
+      if (trainingTarget === "both") {
+        try {
+          const trainStartRes = await fetch(`${BASE_URL}/train_model`, {
+            method: "POST",
+            body: formData,
+          });
 
-        if (!trainStartRes.ok) {
-          let backendMessage = "Failed to start XGBoost training.";
-          try {
-            const errData = await trainStartRes.json();
-            backendMessage = errData?.error || errData?.message || backendMessage;
-          } catch {
-            // Ignore JSON parse issues and keep default message.
+          if (!trainStartRes.ok) {
+            let backendMessage = "Failed to start XGBoost training.";
+            try {
+              const errData = await trainStartRes.json();
+              backendMessage = errData?.error || errData?.message || backendMessage;
+            } catch {
+              // Ignore JSON parse issues and keep default message.
+            }
+            throw new Error(backendMessage);
           }
-          throw new Error(backendMessage);
-        }
 
-        const trainStartData = await trainStartRes.json();
-        if (trainStartData?.training_id) {
-          setActiveTrainingSessionId(trainStartData.training_id);
-          activeSessionId = trainStartData.training_id;
+          const trainStartData = await trainStartRes.json();
+          if (trainStartData?.training_id) {
+            setActiveTrainingSessionId(trainStartData.training_id);
+            activeSessionId = trainStartData.training_id;
+          }
+        } catch (err) {
+          console.error("Failed to start XGBoost training:", err);
+          setError("Failed to start XGBoost training.");
+          setErrorDetails(err.message || "The backend did not accept the XGBoost training request.");
+          return;
         }
-      } catch (err) {
-        console.error("Failed to start training:", err);
-        setError("Failed to start training.");
-        return;
+      } else {
+        setXGBTrainingStatus("idle");
+        setXgbProgress(0);
       }
 
 
@@ -696,13 +715,18 @@ export default function TrainingForEngineers() {
       // }
 
       //const data = await response.json();
-      await waitForXGBTrainingToStart();
-      await pollXGBTrainingStatus();
+      if (trainingTarget === "both") {
+        await waitForXGBTrainingToStart();
+        await pollXGBTrainingStatus();
+      }
 
       const mlpTrainingQuery = activeSessionId
         ? `speed_mode=${encodeURIComponent(speedMode)}&training_id=${encodeURIComponent(activeSessionId)}`
         : `speed_mode=${encodeURIComponent(speedMode)}`;
-      const mlpResponse = await fetch(`${BASE_URL}/train_MLP_model?${mlpTrainingQuery}`, { method: "POST" });
+      const mlpResponse = await fetch(`${BASE_URL}/train_MLP_model?${mlpTrainingQuery}`, {
+        method: "POST",
+        body: formData,
+      });
       if (!mlpResponse.ok) {
         let backendMessage = "Failed to start MLP training.";
         try {
@@ -717,6 +741,10 @@ export default function TrainingForEngineers() {
       await waitForMLPTrainingToStart();
       await pollMLPTrainingStatus();
 
+      setCurrentStep(2);
+      setIsTraining(false);
+      setTrainingUiActiveFlag(false);
+      setActiveTrainingSessionId(null);
       setRetryAttempted(false);
     } catch (err) {
       console.error("Training error:", err);
@@ -790,11 +818,11 @@ export default function TrainingForEngineers() {
       }
     };
 
-    if (
-      isTraining &&
-      mlpTrainingStatus === "completed" &&
-      xgbTrainingStatus === "completed"
-    ) {
+    const trainingFinished = trainingTarget === "mlp"
+      ? mlpTrainingStatus === "completed"
+      : mlpTrainingStatus === "completed" && xgbTrainingStatus === "completed";
+
+    if (isTraining && trainingFinished) {
       fetchMetrics().then(() => {
         setCurrentStep(2);
         setIsTraining(false);
@@ -804,7 +832,7 @@ export default function TrainingForEngineers() {
         }, 1000);
       });
     }
-  }, [isTraining, mlpTrainingStatus, xgbTrainingStatus]);
+  }, [isTraining, mlpTrainingStatus, xgbTrainingStatus, trainingTarget]);
 
   useEffect(() => {
     const fetchMetrics = async () => {
@@ -1226,16 +1254,18 @@ export default function TrainingForEngineers() {
                                     {currentTrainingStage ||
                                       "Training in Progress..."}
                                   </h6>
-                                  <div className="mb-3">
-                                    <h6 className="mb-2">XGBoost Training Progress</h6>
-                                    <ProgressBar
-                                      now={xgbProgress}
-                                      label={`${xgbProgress}%`}
-                                      animated
-                                      variant="info"
-                                      className="mb-3"
-                                    />
-                                  </div>
+                                  {trainingTarget === "both" && (
+                                    <div className="mb-3">
+                                      <h6 className="mb-2">XGBoost Training Progress</h6>
+                                      <ProgressBar
+                                        now={xgbProgress}
+                                        label={`${xgbProgress}%`}
+                                        animated
+                                        variant="info"
+                                        className="mb-3"
+                                      />
+                                    </div>
+                                  )}
 
                                   <div className="mb-3">
                                     <h6 className="mb-2">MLP Training Progress</h6>
@@ -1283,6 +1313,24 @@ export default function TrainingForEngineers() {
                                     <h6 className="mb-3">Model Training</h6>
                                     <div className="d-flex flex-column align-items-center">
                                       <div className="w-100 mb-3" style={{ maxWidth: "420px" }}>
+                                        <label className="form-label fw-semibold" htmlFor="trainingTarget">
+                                          Training Target
+                                        </label>
+                                        <select
+                                          id="trainingTarget"
+                                          className="form-select"
+                                          value={trainingTarget}
+                                          onChange={(e) => setTrainingTargetPreference(e.target.value)}
+                                        >
+                                          <option value="mlp">MLP only (recommended for free Render)</option>
+                                          <option value="both">XGBoost + MLP</option>
+                                        </select>
+                                        <div className="form-text text-start">
+                                          MLP-only avoids the heavier XGBoost tuning step that can exhaust free-tier memory.
+                                        </div>
+                                      </div>
+
+                                      <div className="w-100 mb-3" style={{ maxWidth: "420px" }}>
                                         <label className="form-label fw-semibold" htmlFor="speedMode">
                                           Training Speed
                                         </label>
@@ -1322,7 +1370,9 @@ export default function TrainingForEngineers() {
                                       <p className="text-muted small mb-3">
                                         {forceScratchTraining
                                           ? "Training from scratch will delete existing models and create new ones. This is recommended if you've added new features to your dataset."
-                                          : "XGBoost will train incrementally if a model exists, while MLP always trains from scratch."}
+                                          : trainingTarget === "mlp"
+                                            ? "MLP training will use the uploaded CSV directly and skip the heavier XGBoost step."
+                                            : "XGBoost will train incrementally if a model exists, while MLP always trains from scratch."}
                                       </p>
                                     </div>
                                   </div>

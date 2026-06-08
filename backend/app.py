@@ -1225,7 +1225,9 @@ def delete_old_metrics():
         if os.path.exists("MLP_training_success_token.txt"):
             os.remove("MLP_training_success_token.txt")
             logger.info("🗑️ Deleted old MLP_training_success_token.txt")
-        
+
+        with open("mlp_training_progress.json", "w") as f:
+            json.dump({"status": "not_started", "current_epoch": 0, "total_epochs": MLP_TOTAL_EPOCHS}, f)
 
         return jsonify({"message": "✅ Old training artifacts deleted."}), 200
 
@@ -1514,6 +1516,41 @@ def train_MLP_model():
     with open("mlp_training_progress.json", "w") as f:
         json.dump({"status": "in_progress", "current_epoch": 0, "total_epochs": current_total_epochs}, f)
 
+    if 'file' in request.files:
+        try:
+            file = request.files['file']
+            df_raw = pd.read_csv(file)
+            df_raw.columns = df_raw.columns.str.lower().str.strip().str.replace(" ", "_")
+            if "product/model_#" in df_raw.columns:
+                df_raw.rename(columns={"product/model_#": "product_model"}, inplace=True)
+
+            for col in df_raw.columns:
+                if 'date' in col.lower():
+                    df_raw[col] = df_raw[col].apply(normalize_arabic_digits)
+                    df_raw[col] = pd.to_datetime(df_raw[col], errors="coerce")
+                    df_raw[col] = df_raw[col].dt.strftime('%Y-%m-%d %H:%M:%S')
+                    df_raw[col] = df_raw[col].replace({np.nan: None})
+
+            for col in ['promotion_email', 'register_email']:
+                if col in df_raw.columns:
+                    df_raw[col] = pd.to_numeric(df_raw[col], errors='coerce').fillna(0).astype(int)
+
+            try:
+                insert_or_update_devices(df_raw, file.filename)
+            except Exception as db_error:
+                logger.warning(f"⚠️ DB update failed before MLP training: {db_error}")
+
+            file.seek(0)
+            df = load_data(file, "train")
+            create_processed_features_table(df, overwrite=True)
+            insert_processed_features(df, upload_file=file.filename)
+            logger.info("Stored MLP training data in database.")
+        except Exception as e:
+            logger.error(f"❌ Unexpected error preparing MLP training data: {e}")
+            with open("mlp_training_progress.json", "w") as f:
+                json.dump({"status": "error", "current_epoch": 0, "total_epochs": current_total_epochs, "message": str(e)}, f)
+            return jsonify({"error": str(e)}), 500
+
 
     def run_training():
         try:
@@ -1530,6 +1567,13 @@ def train_MLP_model():
 
             df = pd.read_csv(output_path)
             if 'churn' not in df.columns:
+                with open("mlp_training_progress.json", "w") as f:
+                    json.dump({
+                        "status": "error",
+                        "current_epoch": 0,
+                        "total_epochs": current_total_epochs,
+                        "message": "Processed training data is missing the churn column."
+                    }, f)
                 _update_training_session(training_id)
                 return
 
@@ -1555,9 +1599,9 @@ def train_MLP_model():
                     raise TimeoutError("Training token not created within timeout.")
                 time.sleep(2)
                 
-            # Training done - calculate feature importance and save model and metrics
+            # Training done. Keep feature importance optional because spawning an
+            # extra ML process can exhaust memory on free-tier deployments.
             app.config["MLP_model"], _ = load_MLP_model()
-            subprocess.Popen(["python", "compute_feature_importances_MLP.py"])
             metrics_file = "MLP_metrics.json"
             
             # Signal to frontend end of training. 
@@ -1577,6 +1621,13 @@ def train_MLP_model():
             _update_training_session(training_id, cancelled=True)
         except Exception as e:
             logger.error(f"❌ MLP training failed: {e}")
+            with open("mlp_training_progress.json", "w") as f:
+                json.dump({
+                    "status": "error",
+                    "current_epoch": 0,
+                    "total_epochs": current_total_epochs,
+                    "message": str(e)
+                }, f)
             _update_training_session(training_id)
 
     # Initialize training status and start background thread
