@@ -2,6 +2,7 @@ import os
 import pandas as pd
 import sys
 import json
+import re
 from datetime import datetime
 from sklearn.preprocessing import StandardScaler, OrdinalEncoder
 from sklearn.impute import SimpleImputer
@@ -22,6 +23,91 @@ irrelevant_columns = [
     "upload_timestamp", "upload file", "type", "warranty", "office date", "office time in",
     "defect / damage type", "responsible party", "final status", "month", "source", "carrier"
 ]
+
+
+def normalize_column_name(col):
+    normalized = (
+        str(col)
+        .lstrip("\ufeff")
+        .lower()
+        .strip()
+        .replace(" ", "_")
+        .replace("#", "num")
+        .replace("/", "_")
+        .replace("-", "_")
+        .replace("(", "")
+        .replace(")", "")
+    )
+    normalized = normalized.replace(":", "_")
+    normalized = re.sub(r"[^a-z0-9_]", "", normalized)
+    while "__" in normalized:
+        normalized = normalized.replace("__", "_")
+    normalized = normalized.strip("_")
+
+    aliases = {
+        "product_model_num": "product_model_num",
+        "product_model": "product_model_num",
+        "model": "product_model_num",
+        "device_num": "device_number",
+        "device_no": "device_number",
+        "devicenumber": "device_number",
+        "activated_at": "active_date",
+        "activate_date": "active_date",
+        "activation_date": "active_date",
+        "date_activated": "active_date",
+        "last_bootl_date": "last_boot_date",
+        "last_boot": "last_boot_date",
+        "lastboot": "last_boot_date",
+        "last_boot_interval": "last_boot_interval",
+        "return_type": "type",
+        "return_status": "final_status",
+        "status": "final_status",
+        "returned": "churn",
+        "return": "churn",
+        "churned": "churn",
+        "is_churn": "churn",
+        "is_churned": "churn",
+        "churn_label": "churn",
+        "label": "churn",
+        "target": "churn",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def normalize_churn_values(series):
+    values = series.astype(str).str.strip().str.lower()
+    truthy = {"1", "1.0", "true", "yes", "y", "return", "returned", "repair", "repaired", "churn", "churned"}
+    falsey = {"0", "0.0", "false", "no", "n", "none", "nan", "nat", "<na>", "", "active", "not_returned", "non_churn"}
+    mapped = pd.Series(pd.NA, index=series.index, dtype="Int64")
+    mapped.loc[values.isin(truthy)] = 1
+    mapped.loc[values.isin(falsey)] = 0
+    numeric = pd.to_numeric(series, errors="coerce")
+    mapped.loc[numeric == 1] = 1
+    mapped.loc[numeric == 0] = 0
+    return mapped
+
+
+def infer_churn_labels(df):
+    if "churn" in df.columns:
+        df["churn"] = normalize_churn_values(df["churn"])
+    else:
+        df["churn"] = pd.Series(pd.NA, index=df.index, dtype="Int64")
+
+    if "type" in df.columns:
+        type_values = df["type"].astype(str).str.strip().str.lower()
+        returned = type_values.str.startswith("return") | type_values.str.startswith("repair")
+        df.loc[df["churn"].isna() & returned, "churn"] = 1
+
+    if "final_status" in df.columns and "type" not in df.columns:
+        final_status = df["final_status"].astype(str).str.strip().str.lower()
+        has_return_status = ~final_status.isin({"", "nan", "none", "nat", "<na>"})
+        df.loc[df["churn"].isna() & has_return_status, "churn"] = 1
+
+    if "active_date" in df.columns and "days_since_activation" in df.columns:
+        df.loc[df["churn"].isna() & (df["days_since_activation"] > 30), "churn"] = 0
+
+    df["churn"] = df["churn"].astype("Int64")
+    return df
 
 # Helper Function to pull data from the database. 
 def safe_load_from_db(sql_query, conn, max_retries=5, wait_seconds=2):
@@ -96,13 +182,19 @@ def preprocess_data(input_file, output_file, mode="train"):
     print(f"Raw columns BEFORE normalization or dropping:\n{df.columns.tolist()}\n")
 
     # Normalize feature names
-    df.columns = df.columns.str.lower().str.strip().str.replace(" ", "_").str.replace("#", "num").str.replace("/", "_")
+    df.columns = [normalize_column_name(col) for col in df.columns]
+    keep_mask = [bool(col) and not str(col).startswith("unnamed") for col in df.columns]
+    df = df.loc[:, keep_mask].copy()
+    if df.columns.duplicated().any():
+        duplicate_cols = sorted(set(df.columns[df.columns.duplicated()].tolist()))
+        print(f"⚠️ Duplicate columns after normalization collapsed: {duplicate_cols}")
+        df = df.T.groupby(level=0, sort=False).first().T
 
     # Print altered names for debugging
     print(f"Columns after loading and normalization: {df.columns.tolist()}")
 
     # Normalize irrelevant columns for future dropping of columns. 
-    normalized_irrelevant = [col.lower().strip().replace(" ", "_").replace("#", "num").replace("/", "_") for col in irrelevant_columns]
+    normalized_irrelevant = [normalize_column_name(col) for col in irrelevant_columns]
     
     today = datetime.today()
     
@@ -118,11 +210,10 @@ def preprocess_data(input_file, output_file, mode="train"):
         df['active_date'] = df['active_date'].fillna(median_date)
         df['days_since_activation'] = (today - df['active_date']).dt.days
         
-        # Fill in missing churn rows using 30 day return rule (if activated for more than 30 days, we assume the device cannot be returned)
-        if 'churn' not in df.columns:
-            df['churn'] = None
-        df.loc[df['churn'].isna() & (df['days_since_activation'] > 30), 'churn'] = 0
-        df['churn'] = df['churn'].astype('Int64')
+    if mode == "train":
+        df = infer_churn_labels(df)
+        counts = df["churn"].value_counts(dropna=False).to_dict()
+        print(f"Churn label counts after inference: {counts}")
 
     # Sim Info data manipulations (included in provided file.)
     if 'sim_info' in df.columns:
@@ -180,6 +271,21 @@ def preprocess_data(input_file, output_file, mode="train"):
         df.drop(columns=['churn'], inplace=True)
     else:
         churn_series = None
+
+    if mode == "train":
+        if churn_series is None or churn_series.dropna().empty:
+            raise ValueError(
+                "Training requires a churn label. Add a Churn column, or include "
+                "Type/Final Status/Active Date columns so churn can be inferred. "
+                f"Columns found after normalization: {df.columns.tolist()}"
+            )
+
+        class_counts = churn_series.dropna().astype(int).value_counts().to_dict()
+        if len(class_counts) < 2:
+            raise ValueError(
+                "Training requires both churn and non-churn examples. "
+                f"Inferred churn counts: {class_counts}. Upload data with returned and non-returned devices."
+            )
 
     # Sort columns 
     categorical_cols = df.select_dtypes(include=['object']).columns.tolist()
