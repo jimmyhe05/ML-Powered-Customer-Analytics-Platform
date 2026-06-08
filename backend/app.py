@@ -367,7 +367,13 @@ def _run_subprocess_with_cancellation(command, training_id: str, process_name: s
     if _is_training_cancelled(training_id):
         raise InterruptedError("Training cancelled")
 
-    process = subprocess.Popen(command, env=env)
+    process = subprocess.Popen(
+        command,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
     _register_training_process(training_id, process_name, process)
 
     try:
@@ -383,8 +389,16 @@ def _run_subprocess_with_cancellation(command, training_id: str, process_name: s
 
             return_code = process.poll()
             if return_code is not None:
+                stdout, stderr = process.communicate()
                 if return_code != 0:
-                    raise subprocess.CalledProcessError(return_code, command)
+                    error_output = (stderr or stdout or "").strip()
+                    raise RuntimeError(
+                        f"{process_name} failed with exit code {return_code}: {error_output}"
+                    )
+                if stdout:
+                    logger.info(stdout.strip())
+                if stderr:
+                    logger.warning(stderr.strip())
                 return
 
             time.sleep(1)
@@ -1516,6 +1530,7 @@ def train_MLP_model():
     with open("mlp_training_progress.json", "w") as f:
         json.dump({"status": "in_progress", "current_epoch": 0, "total_epochs": current_total_epochs}, f)
 
+    mlp_input_path = "from_db"
     if 'file' in request.files:
         try:
             file = request.files['file']
@@ -1542,6 +1557,8 @@ def train_MLP_model():
 
             file.seek(0)
             df = load_data(file, "train")
+            df.to_csv("processed_churn_data.csv", index=False)
+            mlp_input_path = "processed_churn_data.csv"
             create_processed_features_table(df, overwrite=True)
             insert_processed_features(df, upload_file=file.filename)
             logger.info("Stored MLP training data in database.")
@@ -1555,15 +1572,13 @@ def train_MLP_model():
     def run_training():
         try:
             # Train the model with processed database data. 
-            input_path = "from_db"
             output_path = "processed_churn_data.csv"
-            mode = "train"
-            
-            _run_subprocess_with_cancellation(
-                ["python", "data_processing.py", input_path, output_path, mode],
-                training_id,
-                "mlp_data_processing",
-            )
+            if mlp_input_path == "from_db":
+                _run_subprocess_with_cancellation(
+                    ["python", "data_processing.py", "from_db", output_path, "train"],
+                    training_id,
+                    "mlp_data_processing",
+                )
 
             df = pd.read_csv(output_path)
             if 'churn' not in df.columns:

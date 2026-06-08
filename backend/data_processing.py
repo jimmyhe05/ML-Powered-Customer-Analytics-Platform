@@ -7,6 +7,7 @@ from sklearn.preprocessing import StandardScaler, OrdinalEncoder
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
+from sqlalchemy import URL
 import time
 from config import get_db_config, get_row_limit
 
@@ -54,7 +55,14 @@ def preprocess_data(input_file, output_file, mode="train"):
         from sqlalchemy import create_engine
         DB_CONFIG = get_db_config() 
 
-        engine_str = f"postgresql://{DB_CONFIG['user']}:{DB_CONFIG['password']}@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
+        engine_str = URL.create(
+            "postgresql+psycopg2",
+            username=DB_CONFIG["user"],
+            password=DB_CONFIG["password"],
+            host=DB_CONFIG["host"],
+            port=int(DB_CONFIG["port"]),
+            database=DB_CONFIG["dbname"],
+        )
         engine = create_engine(engine_str)
         
         LIMIT = get_row_limit()
