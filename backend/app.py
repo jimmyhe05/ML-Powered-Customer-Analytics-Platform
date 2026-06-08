@@ -1265,7 +1265,24 @@ def get_active_training_session():
 def get_training_session(training_id):
     payload = _build_training_session_payload(training_id)
     if not payload:
-        return jsonify({"error": "Training session not found."}), 404
+        xgb_progress = _read_json_file(
+            "xgb_training_progress.json",
+            {"status": "not_started", "current_trial": 0, "total_trials": TOTAL_TRIALS},
+        )
+        mlp_progress = _read_json_file(
+            "mlp_training_progress.json",
+            {"status": "not_started", "current_epoch": 0, "total_epochs": MLP_TOTAL_EPOCHS},
+        )
+        return jsonify({
+            "training_id": training_id,
+            "stale_session": True,
+            "overall_status": _resolve_overall_status(
+                xgb_progress.get("status", "not_started"),
+                mlp_progress.get("status", "not_started"),
+            ),
+            "xgb": xgb_progress,
+            "mlp": mlp_progress,
+        }), 200
     return jsonify(payload), 200
 
 
@@ -1769,6 +1786,9 @@ def feature_importance():
 @app.route('/feature_importance_MLP', methods=['GET'])
 def feature_importance_MLP():
     try:
+        if not os.path.exists("MLP_importance.json"):
+            return jsonify({"feature_importance": []}), 200
+
         with open("MLP_importance.json", "r") as f:
             importance = json.load(f)
 

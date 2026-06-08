@@ -128,8 +128,14 @@ export default function TrainingForEngineers() {
         const sessionRes = await fetch(`${BASE_URL}/training_session/${encodeURIComponent(trainingSessionId)}`);
         if (sessionRes.status === 404) {
           setSupportsSessionApi(false);
+          setActiveTrainingSessionId(null);
+          setTrainingUiActiveFlag(false);
         } else if (sessionRes.ok) {
           sessionPayload = await sessionRes.json();
+          if (sessionPayload?.stale_session) {
+            setActiveTrainingSessionId(null);
+            setTrainingUiActiveFlag(false);
+          }
         }
       }
 
