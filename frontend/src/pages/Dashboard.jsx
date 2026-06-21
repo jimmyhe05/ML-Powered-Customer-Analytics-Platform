@@ -13,7 +13,13 @@ import {
   Pagination,
 } from "react-bootstrap";
 import { Link, useNavigate } from "react-router-dom";
-import { FaTimes, FaChartLine, FaTable } from "react-icons/fa";
+import {
+  FaTimes,
+  FaChartLine,
+  FaTable,
+  FaUpload,
+  FaTrashAlt,
+} from "react-icons/fa";
 import {
   ChurnCountsChart,
   FeatureImportanceChart,
@@ -783,6 +789,8 @@ export default function Dashboard() {
   const pages = hasDashboardContent
     ? [
       {
+        title: "Model drivers",
+        description: "Compare which customer signals influence each model most.",
         content: (
           <Row>
             <Col md={6}>
@@ -821,6 +829,8 @@ export default function Dashboard() {
         ),
       },
       {
+        title: "Churn trend",
+        description: "Track how churn volume changes across reporting periods.",
         content: (
           <Row>
             <Col md={12}>
@@ -830,6 +840,8 @@ export default function Dashboard() {
         ),
       },
       {
+        title: "Customer profile",
+        description: "Explore age segments and activation patterns side by side.",
         content: (
           <Row>
             <Col md={6}>
@@ -842,6 +854,8 @@ export default function Dashboard() {
         ),
       },
       {
+        title: "Product engagement",
+        description: "Understand app usage and carrier mix across the customer base.",
         content: (
           <Row>
             <Col md={6}>
@@ -862,6 +876,8 @@ export default function Dashboard() {
         ),
       },
       {
+        title: "Returns and tenure",
+        description: "Review return outcomes alongside customer usage duration.",
         content: (
           <Row>
             <Col md={6}>
@@ -882,6 +898,8 @@ export default function Dashboard() {
         ),
       },
       {
+        title: "Feature relationships",
+        description: "Inspect correlations between the variables used in analysis.",
         content: (
           <Row>
             <Col md={12}>
@@ -907,119 +925,103 @@ export default function Dashboard() {
 
   if (loading) {
     return (
-      <Container fluid className="py-4">
-        <div className="text-center">Loading dashboard data...</div>
-      </Container>
+      <div className="page-state" role="status" aria-live="polite">
+        <Spinner animation="border" />
+        <div>
+          <h1>Preparing your workspace</h1>
+          <p>Loading analytics, model insights, and recent predictions.</p>
+        </div>
+      </div>
     );
   }
 
   if (error) {
     return (
-      <Container fluid className="py-4">
-        <div className="text-center text-danger">
-          Error loading dashboard: {error}
+      <div className="page-state page-state-error" role="alert">
+        <span className="state-kicker">Connection issue</span>
+        <div>
+          <h1>We couldn’t load the analytics workspace</h1>
+          <p>{error}</p>
         </div>
-      </Container>
+        <Button onClick={() => window.location.reload()}>Try again</Button>
+      </div>
     );
   }
 
   return (
-    <div
-      className="dashboard-container"
-      style={{
-        minHeight: "100vh",
-        background: "linear-gradient(135deg, #f5f7fa 0%, #e4e8eb 100%)",
-        padding: "10px 0",
-        backgroundAttachment: "fixed",
-      }}
-    >
-      <Container fluid className="py-2">
-      <Row className="mb-4 align-items-center pb-3">
-          <Col className="d-flex justify-content-between align-items-center">
-            <h1
-              className="dashboard-title"
-              ref={dashboardTitleRef}
-              style={{
-                color: "#2c3e50",
-                fontWeight: "600",
-                marginBottom: "0",
-                textShadow: "1px 1px 2px rgba(0, 0, 0, 0.1)",
-              }}
-            >
-              Customer Churn Analysis Dashboard
+    <div className="dashboard-container">
+      <Container fluid className="dashboard-content">
+        <section className="dashboard-hero" aria-labelledby="dashboard-title">
+          <div>
+            <span className="eyebrow">Customer intelligence</span>
+            <h1 id="dashboard-title" ref={dashboardTitleRef}>
+              Find the customers who need attention next.
             </h1>
-
-            <div className="d-flex gap-2">
+            <p>
+              Monitor churn signals, compare model drivers, and turn batch
+              predictions into a focused retention workflow.
+            </p>
+            <div className="dashboard-summary" aria-label="Workspace summary">
+              <span><strong>{pages.length}</strong> insight views</span>
+              <span><strong>{predictions.length}</strong> recent batches</span>
+              <span><strong>{riskThreshold}%</strong> risk threshold</span>
+            </div>
+          </div>
+          <div className="hero-actions">
+            <Button
+              className="primary-action"
+              onClick={() => setShowDashboardUploadModal(true)}
+            >
+              <FaUpload aria-hidden="true" />
+              Upload customer data
+            </Button>
               <Button
                 variant="outline-danger"
                 onClick={handleResetDashboardData}
-                style={{
-                  borderRadius: "10px",
-                  fontWeight: "500",
-                  background: "linear-gradient(135deg, #e74c3c 0%, #c0392b 100%)",
-                  color: "white",
-                  border: "none",
-                  boxShadow: "0 4px 8px rgba(0,0,0,0.1)",
-                  transition: "all 0.3s ease",
-                }}
-                onMouseOver={(e) => {
-                  e.currentTarget.style.transform = "translateY(-3px)";
-                  e.currentTarget.style.boxShadow = "0 6px 12px rgba(0,0,0,0.15)";
-                }}
-                onMouseOut={(e) => {
-                  e.currentTarget.style.transform = "translateY(0)";
-                  e.currentTarget.style.boxShadow = "0 4px 8px rgba(0,0,0,0.1)";
-                }}
+                className="quiet-danger-action"
               >
-                Reset Dashboard
+                <FaTrashAlt aria-hidden="true" />
+                Reset data
               </Button>
+          </div>
+        </section>
 
-              <Button
-                onClick={() => setShowDashboardUploadModal(true)}
-                style={{
-                  borderRadius: "10px",
-                  fontWeight: "500",
-                  background: "linear-gradient(135deg, #3498db 0%, #2980b9 100%)",
-                  color: "white",
-                  border: "none",
-                  boxShadow: "0 4px 8px rgba(0,0,0,0.1)",
-                  transition: "all 0.3s ease",
-                }}
-                onMouseOver={(e) => {
-                  e.currentTarget.style.transform = "translateY(-3px)";
-                  e.currentTarget.style.boxShadow = "0 6px 12px rgba(0,0,0,0.15)";
-                }}
-                onMouseOut={(e) => {
-                  e.currentTarget.style.transform = "translateY(0)";
-                  e.currentTarget.style.boxShadow = "0 4px 8px rgba(0,0,0,0.1)";
-                }}
-              >
-                Upload Dashboard Data
-              </Button>
+        <section className="insights-section" aria-labelledby="insights-heading">
+          <div className="section-heading">
+            <div>
+              <span className="eyebrow">Analytics overview</span>
+              <h2 id="insights-heading">
+                {pages[page]?.title || "Customer insights"}
+              </h2>
+              <p>{pages[page]?.description || "Upload a dataset to begin exploring customer patterns."}</p>
             </div>
-          </Col>
-        </Row>
+            {pages.length > 0 && (
+              <span className="view-counter">View {page + 1} of {pages.length}</span>
+            )}
+          </div>
 
-
-        <Row className="g-4">
+          <Row className="g-4 dashboard-chart-grid">
           {currentPageContent || (
             <Col>
-              <Card className="border-0 shadow-sm">
-                <Card.Body>
-                  <div className="text-center text-muted py-4">
-                    No dashboard data available yet. Upload dashboard data to populate charts.
+              <Card className="empty-state-card">
+                <Card.Body className="empty-state">
+                  <FaChartLine aria-hidden="true" />
+                  <div>
+                    <h3>Your analytics canvas is ready</h3>
+                    <p>Upload CSV or XLSX customer data to populate trends, segments, and model insights.</p>
                   </div>
+                  <Button onClick={() => setShowDashboardUploadModal(true)}>
+                    Upload dashboard data
+                  </Button>
                 </Card.Body>
               </Card>
             </Col>
           )}
         </Row>
 
-        {/* Move pagination closer to the charts */}
-        {/* Pagination Row */}
-        <Row className="mt-1">
+        {pages.length > 1 && <Row className="mt-3">
           <Col className="d-flex justify-content-center">
-            <Pagination>
+            <Pagination aria-label="Analytics views">
               <Pagination.First
                 onClick={() => handleDashboardPageChange(0)}
                 disabled={page === 0}
@@ -1036,6 +1038,7 @@ export default function Dashboard() {
                   active={i === page}
                   onClick={() => handleDashboardPageChange(i)}
                   className="mx-1"
+                  aria-label={`Show ${pages[i].title}`}
                 >
                   {i + 1}
                 </Pagination.Item>
@@ -1052,32 +1055,20 @@ export default function Dashboard() {
               />
             </Pagination>
           </Col>
-        </Row>
+        </Row>}
+        </section>
       </Container>
 
       {/* Predictions Section */}
-      <Row className="mt-4">
+      <Row className="dashboard-predictions-row mx-0">
         <Col>
           <Card
-            className="shadow-sm p-4 mb-4"
-            style={{
-              borderRadius: "15px",
-              background: "rgba(255, 255, 255, 0.95)",
-              backdropFilter: "blur(10px)",
-              border: "none",
-              boxShadow: "0 8px 20px rgba(0, 0, 0, 0.08)",
-              transition: "transform 0.3s ease, box-shadow 0.3s ease",
-            }}
+            className="prediction-history-card p-3 p-md-4 mb-4"
           >
-            <div className="d-flex justify-content-between align-items-center mb-4">
+            <div className="section-heading prediction-heading mb-4">
               <div>
                 <Card.Title
                   className="mb-1 d-flex align-items-center gap-2"
-                  style={{
-                    color: "#2c3e50",
-                    fontWeight: "600",
-                    fontSize: "1.5rem",
-                  }}
                 >
                   <FaChartLine className="text-primary" />
                   Most Recent Predictions
@@ -1086,56 +1077,20 @@ export default function Dashboard() {
                   View and manage your prediction results
                 </p>
               </div>
-              <div className="d-flex gap-2">
+              <div className="section-actions">
                 <Button
                   variant="outline-primary"
                   onClick={fetchAllPredictions}
-                  className="d-flex align-items-center gap-2 px-4 py-2"
-                  style={{
-                    borderRadius: "10px",
-                    boxShadow: "0 4px 8px rgba(0,0,0,0.1)",
-                    transition: "all 0.3s ease",
-                    borderWidth: "1.5px",
-                    fontWeight: "500",
-                  }}
-                  onMouseOver={(e) => {
-                    e.currentTarget.style.transform = "translateY(-3px)";
-                    e.currentTarget.style.boxShadow =
-                      "0 6px 12px rgba(0,0,0,0.15)";
-                  }}
-                  onMouseOut={(e) => {
-                    e.currentTarget.style.transform = "translateY(0)";
-                    e.currentTarget.style.boxShadow =
-                      "0 4px 8px rgba(0,0,0,0.1)";
-                  }}
+                  className="d-flex align-items-center gap-2"
                 >
-                  <FaTable className="me-2" /> View All Predictions
+                  <FaTable /> View all
                 </Button>
                 <Button
                   variant="primary"
                   onClick={() => setShowModal(true)}
-                  className="d-flex align-items-center gap-2 px-4 py-2"
-                  style={{
-                    borderRadius: "10px",
-                    boxShadow: "0 4px 8px rgba(0,0,0,0.1)",
-                    transition: "all 0.3s ease",
-                    background:
-                      "linear-gradient(135deg, #3498db 0%, #2980b9 100%)",
-                    border: "none",
-                    fontWeight: "500",
-                  }}
-                  onMouseOver={(e) => {
-                    e.currentTarget.style.transform = "translateY(-3px)";
-                    e.currentTarget.style.boxShadow =
-                      "0 6px 12px rgba(0,0,0,0.15)";
-                  }}
-                  onMouseOut={(e) => {
-                    e.currentTarget.style.transform = "translateY(0)";
-                    e.currentTarget.style.boxShadow =
-                      "0 4px 8px rgba(0,0,0,0.1)";
-                  }}
+                  className="d-flex align-items-center gap-2"
                 >
-                  <FaChartLine className="me-2" /> Generate New Prediction
+                  <FaChartLine /> New prediction
                 </Button>
               </div>
             </div>
@@ -1902,52 +1857,6 @@ export default function Dashboard() {
         </Modal>
       </Row>
 
-      <style>
-        {`
-          .card {
-            background: rgba(255, 255, 255, 0.9);
-            backdrop-filter: blur(10px);
-            border: none;
-            border-radius: 15px;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            transition: transform 0.2s ease-in-out;
-          }
-          
-          .card:hover {
-            transform: translateY(-5px);
-          }
-
-          .pagination {
-            margin-top: 1rem;
-            margin-bottom: 1rem;
-          }
-
-          .pagination .page-item .page-link {
-            background-color: rgba(255, 255, 255, 0.9);
-            border: none;
-            color: #2c3e50;
-            padding: 0.5rem 1rem;
-            margin: 0 0.2rem;
-            border-radius: 8px;
-            transition: all 0.2s ease-in-out;
-          }
-
-          .pagination .page-item.active .page-link {
-            background-color: #2c3e50;
-            color: white;
-          }
-
-          .pagination .page-item .page-link:hover:not(.active) {
-            background-color: #e4e8eb;
-            transform: translateY(-2px);
-          }
-
-          .pagination .page-item.disabled .page-link {
-            background-color: rgba(255, 255, 255, 0.5);
-            color: #6c757d;
-          }
-        `}
-      </style>
     </div>
   );
 }

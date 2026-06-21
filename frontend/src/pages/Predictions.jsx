@@ -135,7 +135,9 @@ export default function Predictions() {
 
   // Calculate statistics
   const totalCustomers = predictions.length;
-  const riskRate = ((riskyCustomers.length / totalCustomers) * 100).toFixed(1);
+  const riskRate = totalCustomers > 0
+    ? ((riskyCustomers.length / totalCustomers) * 100).toFixed(1)
+    : "0.0";
 
   // Handle export to CSV
   const handleExportCSV = () => {
@@ -201,12 +203,12 @@ export default function Predictions() {
   }, [predictions, searchTerm, filterRisk, riskThreshold]);
 
   return (
-    <Container fluid className="mt-4">
+    <Container fluid className="predictions-page mt-4">
       <div
-        className="d-flex justify-content-between align-items-center mb-4"
+        className="predictions-toolbar d-flex justify-content-between align-items-center mb-4"
         ref={predictionResultsRef}
       >
-        <div className="d-flex gap-2">
+        <div className="predictions-toolbar-actions d-flex gap-2">
           <Button
             variant="outline-secondary"
             onClick={() => navigate("/")}
@@ -222,8 +224,11 @@ export default function Predictions() {
             <FaSync /> Reset Threshold
           </Button>
         </div>
-        <div className="d-flex align-items-center gap-3">
-          <h1 className="mb-0">Prediction Results</h1>
+        <div className="predictions-title d-flex align-items-center gap-3">
+          <div>
+            <span className="eyebrow">Batch analysis</span>
+            <h1 className="mb-0">Prediction results</h1>
+          </div>
           <Dropdown>
             <Dropdown.Toggle
               variant="outline-primary"

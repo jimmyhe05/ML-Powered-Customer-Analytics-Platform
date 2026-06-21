@@ -12,13 +12,10 @@ import Footer from "./components/Footer";
 export default function App() {
   return (
     <BrowserRouter>
-      {/* Flex container to ensure footer sticks to the bottom */}
-      <div className="d-flex flex-column min-vh-100">
-        {/* Header */}
+      <div className="app-frame d-flex flex-column min-vh-100">
         <Header />
 
-        {/* Main content area */}
-        <div className="flex-grow-1">
+        <main className="flex-grow-1">
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route
@@ -35,9 +32,8 @@ export default function App() {
             <Route path="/terms-of-service" element={<TermsOfService />} />
             <Route path="/contact" element={<Contact />} />
           </Routes>
-        </div>
+        </main>
 
-        {/* Footer */}
         <Footer />
       </div>
     </BrowserRouter>

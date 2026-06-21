@@ -15,6 +15,7 @@ import { useNavigate } from "react-router-dom";
 import Papa from "papaparse";
 import { motion, AnimatePresence } from "framer-motion";
 import PropTypes from "prop-types";
+import { FaCloudUploadAlt } from "react-icons/fa";
 
 const rawApiUrl = import.meta.env.VITE_API_URL?.trim();
 const BASE_URL = rawApiUrl
@@ -993,43 +994,28 @@ export default function TrainingForEngineers() {
   ];
 
   const CustomStepper = () => (
-    <div className="d-flex flex-column flex-md-row justify-content-between align-items-center mb-5">
+    <div className="training-stepper mb-5" aria-label="Training progress">
       {steps.map((step, index) => (
-        <div
+        <button
+          type="button"
           key={index}
-          className="d-flex align-items-center mb-3 mb-md-0"
-          style={{ cursor: "pointer" }}
+          className={`training-step ${currentStep >= index ? "is-complete" : ""}`}
           onClick={() => navigateStep(index)}
+          aria-current={currentStep === index ? "step" : undefined}
         >
-          <div
-            className={`rounded-circle d-flex align-items-center justify-content-center ${currentStep >= index
-              ? "bg-success text-white"
-              : "bg-light text-muted"
-              }`}
-            style={{ width: "40px", height: "40px" }}
-          >
+          <span className="training-step-number">
             {index + 1}
-          </div>
-          <div className="ms-3">
-            <div
-              className={`fw-bold ${currentStep >= index ? "text-success" : "text-muted"
-                }`}
-            >
-              {step.title}
-            </div>
-            <div className="small text-muted d-none d-md-block">
+          </span>
+          <span className="training-step-copy">
+            <strong>{step.title}</strong>
+            <small>
               {step.description}
-            </div>
-            <div className="small text-muted d-md-none">{step.title}</div>
-          </div>
+            </small>
+          </span>
           {index < steps.length - 1 && (
-            <div
-              className={`mx-3 flex-grow-1 d-none d-md-block ${currentStep > index ? "bg-success" : "bg-light"
-                }`}
-              style={{ height: "2px" }}
-            />
+            <span className="training-step-line" aria-hidden="true" />
           )}
-        </div>
+        </button>
       ))}
     </div>
   );
@@ -1060,7 +1046,7 @@ export default function TrainingForEngineers() {
   };
 
   return (
-    <Container className="my-3 my-md-5">
+    <Container className="training-page my-4 my-md-5">
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
@@ -1068,13 +1054,12 @@ export default function TrainingForEngineers() {
       >
         <Row className="justify-content-center">
           <Col md={10}>
-            <Card className="shadow-lg border-0">
-              <Card.Header className="bg-success text-white py-3 py-md-4">
-                <h3 className="mb-0 fs-4 fs-md-3">
-                  AI Model Training Dashboard
-                </h3>
-                <p className="text-white-50 mb-0 small">
-                  Train your custom AI models with your dataset
+            <Card className="training-workspace-card">
+              <Card.Header className="training-card-header py-4 py-md-5">
+                <span className="eyebrow">Model operations</span>
+                <h1 className="mb-2">Train a churn model</h1>
+                <p className="mb-0">
+                  Upload a validated dataset, choose a training profile, and follow progress through evaluation.
                 </p>
               </Card.Header>
               <Card.Body className="p-3 p-md-4">
@@ -1158,7 +1143,7 @@ export default function TrainingForEngineers() {
                               </motion.div>
                             ) : (
                               <div className="text-center">
-                                <i className="fas fa-cloud-upload-alt fa-3x fa-md-4x mb-3 mb-md-4 text-success"></i>
+                                <FaCloudUploadAlt className="upload-icon mb-3" aria-hidden="true" />
                                 <h5 className="mb-3 fs-5">
                                   Upload Your Training Data
                                 </h5>
