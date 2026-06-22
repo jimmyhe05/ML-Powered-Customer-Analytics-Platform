@@ -15,6 +15,7 @@ from psycopg2.extras import execute_batch
 from datetime import datetime
 from sqlalchemy import URL, create_engine
 import re
+import sys
 import torch
 import subprocess
 import threading
@@ -505,7 +506,7 @@ def process_file(input_path, output_path, mode):
             f"Processing file: {input_path} in {mode} mode with data_processing.py...")
         
         #Call data processing file/
-        subprocess.run(["python", "data_processing.py",
+        subprocess.run([sys.executable, "data_processing.py",
                        input_path, output_path, mode], check=True)
 
         logger.info("✅ File processed successfully.")
@@ -1441,7 +1442,7 @@ def train_model():
                 input_path = "from_db"
                 output_path = "processed_churn_data.csv"
                 _run_subprocess_with_cancellation(
-                    ["python", "data_processing.py", input_path, output_path, "train"],
+                    [sys.executable, "data_processing.py", input_path, output_path, "train"],
                     training_id,
                     "xgb_data_processing",
                 )
@@ -1457,7 +1458,7 @@ def train_model():
                 train_env = os.environ.copy()
                 train_env["XGB_TOTAL_TRIALS"] = str(current_total_trials)
                 _run_subprocess_with_cancellation(
-                    ["python", "train.py", output_path],
+                    [sys.executable, "train.py", output_path],
                     training_id,
                     "xgb_training",
                     env=train_env,
@@ -1575,7 +1576,7 @@ def train_MLP_model():
             output_path = "processed_churn_data.csv"
             if mlp_input_path == "from_db":
                 _run_subprocess_with_cancellation(
-                    ["python", "data_processing.py", "from_db", output_path, "train"],
+                    [sys.executable, "data_processing.py", "from_db", output_path, "train"],
                     training_id,
                     "mlp_data_processing",
                 )
@@ -1596,7 +1597,7 @@ def train_MLP_model():
             train_env = os.environ.copy()
             train_env["MLP_TOTAL_EPOCHS"] = str(current_total_epochs)
             _run_subprocess_with_cancellation(
-                ["python", "MLP1.py", output_path],
+                [sys.executable, "MLP1.py", output_path],
                 training_id,
                 "mlp_training",
                 env=train_env,

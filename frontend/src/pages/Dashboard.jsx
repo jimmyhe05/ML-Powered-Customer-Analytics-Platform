@@ -19,6 +19,7 @@ import {
   FaTable,
   FaUpload,
   FaTrashAlt,
+  FaExclamationTriangle,
 } from "react-icons/fa";
 import {
   ChurnCountsChart,
@@ -32,6 +33,7 @@ import {
   CorrelationHeatmap,
 } from "../components/charts";
 import { formatFeatureName } from "../components/charts/utils";
+import { useToast } from "../components/Toast";
 
 const emptyReturnAnalysis = {
   source_distribution: [],
@@ -160,12 +162,14 @@ export default function Dashboard() {
     );
   }
 
+  const toast = useToast();
+
   const handleDashboardFileSelect = (event) => {
     const file = event.target.files[0];
     if (file && (file.type === "text/csv" || file.type === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")) {
       setDashboardFile(file);
     } else {
-      alert("Please upload a valid CSV or XLSX file.");
+      toast({ message: "Please upload a valid CSV or XLSX file.", variant: "warning" });
       setDashboardFile(null);
     }
   };
@@ -185,7 +189,7 @@ export default function Dashboard() {
       }, { retries: 2, baseDelay: 2000 });
 
       if (response.ok) {
-        alert("✅ Dashboard data uploaded successfully!");
+        toast({ message: "Dashboard data uploaded successfully.", variant: "success" });
         setShowDashboardUploadModal(false);
         setDashboardFile(null);
         setIsUploadingDashboard(false);
@@ -200,7 +204,7 @@ export default function Dashboard() {
               setLoading(false);
             } else {
               console.error("Invalid dashboard data:", data);
-              setDashboardData(null); // or handle more gracefully
+              setDashboardData(null);
               setLoading(false);
             }
           })
@@ -223,39 +227,34 @@ export default function Dashboard() {
       } else {
         const errorData = await response.json();
         console.error("Dashboard upload error:", errorData);
-        alert("❌ Failed to upload dashboard data.");
+        toast({ message: "Failed to upload dashboard data. Please try again.", variant: "danger" });
       }
     } catch (error) {
       console.error("Dashboard upload exception:", error);
-      alert("❌ Upload failed. Please try again.");
+      toast({ message: "Upload failed. Check your connection and try again.", variant: "danger" });
     } finally {
       setIsUploadingDashboard(false);
     }
   };
 
-  const handleResetDashboardData = async () => {
-    if (!window.confirm("Are you sure you want to reset the dashboard? This will clear all uploaded data.")) {
-      return;
-    }
+  const [showResetDashboardConfirm, setShowResetDashboardConfirm] = useState(false);
 
+  const handleResetDashboardData = async () => {
+    setShowResetDashboardConfirm(false);
     try {
       const response = await apiFetch(`${BASE_URL}/reset_dashboard_data`, {
-        method: "POST", // or "DELETE", depending on your backend
+        method: "POST",
       }, { retries: 2, baseDelay: 2000 });
 
       if (response.ok) {
-        alert("✅ Dashboard data has been reset!");
-
-        // Clear dashboard visualizations
+        toast({ message: "Dashboard data has been reset.", variant: "info" });
         setDashboardData(null);
         setCarrierData([]);
-  setReturnData(emptyReturnAnalysis);
+        setReturnData(emptyReturnAnalysis);
         setUsageData(null);
-        setCorrelationData([]);  // if you want to clear heatmap too
-  setPage(0);
-
+        setCorrelationData([]);
+        setPage(0);
         setLoading(true);
-        // Optionally re-fetch empty dashboard to refresh view
         apiJson(`${BASE_URL}/dashboard_data`)
           .then((data) => {
             setDashboardData(data || null);
@@ -266,11 +265,11 @@ export default function Dashboard() {
             setLoading(false);
           });
       } else {
-        alert("❌ Failed to reset dashboard data. Please try again.");
+        toast({ message: "Failed to reset dashboard data. Please try again.", variant: "danger" });
       }
     } catch (error) {
       console.error("Reset dashboard error:", error);
-      alert("❌ An error occurred during reset.");
+      toast({ message: "An error occurred during reset.", variant: "danger" });
     }
   };
 
@@ -476,7 +475,7 @@ export default function Dashboard() {
     if (file && file.type === "text/csv") {
       setSelectedFile(file);
     } else {
-      alert("Please upload a valid CSV file.");
+      toast({ message: "Please upload a valid CSV file.", variant: "warning" });
     }
   };
 
@@ -486,7 +485,7 @@ export default function Dashboard() {
     if (file && file.type === "text/csv") {
       setSelectedFile(file);
     } else {
-      alert("Please upload a valid CSV file.");
+      toast({ message: "Please upload a valid CSV file.", variant: "warning" });
       setSelectedFile(null);
     }
   };
@@ -496,7 +495,7 @@ export default function Dashboard() {
     if (!selectedFile) return;
     if (!modelAvailability[selectedModel]) {
       const modelName = selectedModel === "xgboost" ? "XGBoost" : "MLP";
-      alert(`${modelName} is not trained on the deployed backend yet. Train it first from the Training page, then generate predictions.`);
+      toast({ message: `${modelName} is not trained yet. Train the model first from the Model Training page.`, variant: "warning", duration: 6000 });
       return;
     }
 
@@ -562,11 +561,11 @@ export default function Dashboard() {
         });
       } else {
         const message = data?.error || "Error generating predictions.";
-        alert(message);
+        toast({ message, variant: "danger" });
       }
     } catch (error) {
       console.error("Prediction error:", error);
-      alert(error.message || "Failed to generate predictions.");
+      toast({ message: error.message || "Failed to generate predictions.", variant: "danger" });
     } finally {
       setIsProcessing(false);
     }
@@ -600,15 +599,12 @@ export default function Dashboard() {
         }
       } else {
         const errorData = await response.json();
-        console.error(
-          "Error deleting batch:",
-          errorData.error || response.statusText
-        );
-        alert("❌ Failed to delete the prediction batch.");
+        console.error("Error deleting batch:", errorData.error || response.statusText);
+        toast({ message: "Failed to delete the prediction batch.", variant: "danger" });
       }
     } catch (err) {
       console.error("Error:", err);
-      alert("❌ An error occurred while deleting the prediction batch.");
+      toast({ message: "An error occurred while deleting the prediction batch.", variant: "danger" });
     }
   };
 
@@ -653,7 +649,7 @@ export default function Dashboard() {
       setShowAllPredictionsModal(true);
     } catch (error) {
       console.error("Error fetching all predictions:", error);
-      alert("Failed to fetch all predictions. Please try again.");
+      toast({ message: "Failed to fetch all predictions. Please try again.", variant: "danger" });
     } finally {
       setIsLoadingAllPredictions(false);
     }
@@ -666,34 +662,28 @@ export default function Dashboard() {
     setCurrentPage(1);
   };
 
+  const [showClearAllConfirm, setShowClearAllConfirm] = useState(false);
+
   // Handle clear all predictions
   const handleClearAllPredictions = async () => {
-    if (
-      window.confirm(
-        "Are you sure you want to delete all predictions? This action cannot be undone."
-      )
-    ) {
-      try {
-        const response = await apiFetch(`${BASE_URL}/delete_all_predictions`, {
-          method: "DELETE",
-        });
+    setShowClearAllConfirm(false);
+    try {
+      const response = await apiFetch(`${BASE_URL}/delete_all_predictions`, {
+        method: "DELETE",
+      });
 
-        if (response.ok) {
-          setAllPredictions([]);
-          setPredictions([]);
-          alert("All predictions have been deleted successfully.");
-        } else {
-          const errorData = await response.json();
-          console.error(
-            "Error deleting all predictions:",
-            errorData.error || response.statusText
-          );
-          alert("Failed to delete all predictions. Please try again.");
-        }
-      } catch (err) {
-        console.error("Error:", err);
-        alert("An error occurred while deleting all predictions.");
+      if (response.ok) {
+        setAllPredictions([]);
+        setPredictions([]);
+        toast({ message: "All predictions deleted successfully.", variant: "info" });
+      } else {
+        const errorData = await response.json();
+        console.error("Error deleting all predictions:", errorData.error || response.statusText);
+        toast({ message: "Failed to delete all predictions. Please try again.", variant: "danger" });
       }
+    } catch (err) {
+      console.error("Error:", err);
+      toast({ message: "An error occurred while deleting all predictions.", variant: "danger" });
     }
   };
 
@@ -975,14 +965,14 @@ export default function Dashboard() {
               <FaUpload aria-hidden="true" />
               Upload customer data
             </Button>
-              <Button
-                variant="outline-danger"
-                onClick={handleResetDashboardData}
-                className="quiet-danger-action"
-              >
-                <FaTrashAlt aria-hidden="true" />
-                Reset data
-              </Button>
+            <Button
+              variant="outline-danger"
+              onClick={() => setShowResetDashboardConfirm(true)}
+              className="quiet-danger-action"
+            >
+              <FaTrashAlt aria-hidden="true" />
+              Reset data
+            </Button>
           </div>
         </section>
 
@@ -1200,15 +1190,7 @@ export default function Dashboard() {
                           <Button
                             variant="link"
                             className="p-0"
-                            onClick={() => {
-                              console.log(
-                                "🧪 Remove clicked",
-                                prediction.predictionBatchId
-                              );
-                              handleRemovePrediction(
-                                prediction.predictionBatchId
-                              );
-                            }}
+                            onClick={() => handleRemovePrediction(prediction.predictionBatchId)}
                             title="Remove prediction"
                             style={{
                               transition: "all 0.2s ease",
@@ -1419,8 +1401,9 @@ export default function Dashboard() {
           centered
         >
           <Modal.Header closeButton className="border-0 pb-0">
-            <Modal.Title style={{ fontWeight: "600" }}>
-              📈 Upload Dashboard Data
+            <Modal.Title className="d-flex align-items-center gap-2" style={{ fontWeight: "600" }}>
+              <FaUpload className="text-primary" />
+              Upload Dashboard Data
             </Modal.Title>
           </Modal.Header>
           <Modal.Body className="pt-4">
@@ -1589,10 +1572,10 @@ export default function Dashboard() {
                     <Button
                       variant="outline-danger"
                       size="sm"
-                      onClick={handleClearAllPredictions}
+                      onClick={() => setShowClearAllConfirm(true)}
                       className="d-flex align-items-center gap-1"
                     >
-                      <FaTimes className="me-1" /> Clear All
+                      <FaTrashAlt className="me-1" /> Clear All
                     </Button>
                   </div>
                 </div>
@@ -1742,15 +1725,7 @@ export default function Dashboard() {
                                 <Button
                                   variant="link"
                                   className="p-0"
-                                  onClick={() => {
-                                    console.log(
-                                      "🧪 Remove clicked",
-                                      prediction.predictionBatchId
-                                    );
-                                    handleRemovePrediction(
-                                      prediction.predictionBatchId
-                                    );
-                                  }}
+                                  onClick={() => handleRemovePrediction(prediction.predictionBatchId)}
                                   title="Remove prediction"
                                   style={{
                                     transition: "all 0.2s ease",
@@ -1758,13 +1733,11 @@ export default function Dashboard() {
                                     padding: "0.25rem",
                                   }}
                                   onMouseOver={(e) => {
-                                    e.currentTarget.style.transform =
-                                      "scale(1.2)";
+                                    e.currentTarget.style.transform = "scale(1.2)";
                                     e.currentTarget.style.color = "#c0392b";
                                   }}
                                   onMouseOut={(e) => {
-                                    e.currentTarget.style.transform =
-                                      "scale(1)";
+                                    e.currentTarget.style.transform = "scale(1)";
                                     e.currentTarget.style.color = "#e74c3c";
                                   }}
                                 >
@@ -1855,6 +1828,43 @@ export default function Dashboard() {
             </Button>
           </Modal.Footer>
         </Modal>
+
+        {/* Confirm Reset Dashboard Modal */}
+        <Modal show={showResetDashboardConfirm} onHide={() => setShowResetDashboardConfirm(false)} centered size="sm">
+          <Modal.Header closeButton className="border-0">
+            <Modal.Title className="d-flex align-items-center gap-2 fs-6" style={{ fontWeight: 700 }}>
+              <FaExclamationTriangle className="text-warning" /> Confirm Reset
+            </Modal.Title>
+          </Modal.Header>
+          <Modal.Body>
+            <p className="mb-0" style={{ fontSize: "0.9rem" }}>
+              This will clear all uploaded dashboard data and charts. This action cannot be undone.
+            </p>
+          </Modal.Body>
+          <Modal.Footer className="border-0 pt-0">
+            <Button variant="outline-secondary" size="sm" onClick={() => setShowResetDashboardConfirm(false)}>Cancel</Button>
+            <Button variant="danger" size="sm" onClick={handleResetDashboardData}>Reset data</Button>
+          </Modal.Footer>
+        </Modal>
+
+        {/* Confirm Clear All Predictions Modal */}
+        <Modal show={showClearAllConfirm} onHide={() => setShowClearAllConfirm(false)} centered size="sm">
+          <Modal.Header closeButton className="border-0">
+            <Modal.Title className="d-flex align-items-center gap-2 fs-6" style={{ fontWeight: 700 }}>
+              <FaExclamationTriangle className="text-warning" /> Delete All Predictions
+            </Modal.Title>
+          </Modal.Header>
+          <Modal.Body>
+            <p className="mb-0" style={{ fontSize: "0.9rem" }}>
+              All prediction batches will be permanently deleted. This action cannot be undone.
+            </p>
+          </Modal.Body>
+          <Modal.Footer className="border-0 pt-0">
+            <Button variant="outline-secondary" size="sm" onClick={() => setShowClearAllConfirm(false)}>Cancel</Button>
+            <Button variant="danger" size="sm" onClick={handleClearAllPredictions}>Delete all</Button>
+          </Modal.Footer>
+        </Modal>
+
       </Row>
 
     </div>

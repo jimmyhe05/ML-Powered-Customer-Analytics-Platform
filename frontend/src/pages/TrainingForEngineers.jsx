@@ -15,7 +15,8 @@ import { useNavigate } from "react-router-dom";
 import Papa from "papaparse";
 import { motion, AnimatePresence } from "framer-motion";
 import PropTypes from "prop-types";
-import { FaCloudUploadAlt } from "react-icons/fa";
+import { FaCloudUploadAlt, FaExclamationTriangle } from "react-icons/fa";
+import { useToast } from "../components/Toast";
 
 const rawApiUrl = import.meta.env.VITE_API_URL?.trim();
 const BASE_URL = rawApiUrl
@@ -57,6 +58,7 @@ export default function TrainingForEngineers() {
     healthy: true,
   });
   const navigate = useNavigate();
+  const toast = useToast();
   const [mlpProgress, setMlpProgress] = useState(0);
   const [xgbProgress, setXgbProgress] = useState(0);
   const [showResetModal, setShowResetModal] = useState(false);
@@ -403,7 +405,7 @@ export default function TrainingForEngineers() {
             const progressRes = await fetch(`${BASE_URL}/training_progress_XGB`);
             const progressData = await progressRes.json();
 
-            console.log("🔄 XGBoost Status:", data, "Progress:", progressData);
+            console.log("XGBoost Status:", data, "Progress:", progressData);
 
             if (progressData && typeof progressData.current_trial === "number") {
               const { current_trial, total_trials } = progressData;
@@ -464,7 +466,7 @@ export default function TrainingForEngineers() {
             const progressRes = await fetch(`${BASE_URL}/training_progress_MLP`);
             const progressData = await progressRes.json();
 
-            console.log("🔄 Polling MLP Status:", data);
+            console.log("Polling MLP Status:", data);
 
             if (progressData && typeof progressData.current_epoch === "number") {
               const { current_epoch, total_epochs } = progressData;
@@ -802,7 +804,7 @@ export default function TrainingForEngineers() {
           if (xgbData.metrics && !xgbData.metrics.error) {
             setModelAccuracy(xgbData.metrics);
           } else {
-            console.warn("❌ XGBoost metrics not available:", xgbData.metrics?.error);
+            console.warn("XGBoost metrics not available:", xgbData.metrics?.error);
           }
         }
 
@@ -811,11 +813,11 @@ export default function TrainingForEngineers() {
           if (mlpData.metrics && !mlpData.metrics.error) {
             setMlpAccuracy(mlpData.metrics);
           } else {
-            console.warn("❌ MLP metrics not available:", mlpData.metrics?.error);
+            console.warn("MLP metrics not available:", mlpData.metrics?.error);
           }
         }
       } catch (err) {
-        console.error("❌ Failed to fetch model metrics:", err);
+        console.error("Failed to fetch model metrics:", err);
       }
     };
 
@@ -857,7 +859,7 @@ export default function TrainingForEngineers() {
           }
         }
       } catch (err) {
-        console.error("❌ Failed to fetch model metrics on step load:", err);
+        console.error("Failed to fetch model metrics on step load:", err);
       }
     };
   
@@ -880,13 +882,11 @@ export default function TrainingForEngineers() {
     setMlpProgress(0);
   };
 
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false);
+  const [showForceResetConfirm, setShowForceResetConfirm] = useState(false);
+
   const handleForceResetTraining = async () => {
-    const confirmed = window.confirm(
-      "This will reset current training progress and clear uploaded model artifacts. Continue?"
-    );
-
-    if (!confirmed) return;
-
+    setShowForceResetConfirm(false);
     setResetting(true);
     try {
       let resetSucceeded = false;
@@ -933,9 +933,7 @@ export default function TrainingForEngineers() {
   };
 
   const handleCancelTraining = async () => {
-    const confirmed = window.confirm("Cancel the current training run?");
-    if (!confirmed) return;
-
+    setShowCancelConfirm(false);
     setResetting(true);
     try {
       let cancelledOnBackend = false;
@@ -1046,6 +1044,7 @@ export default function TrainingForEngineers() {
   };
 
   return (
+    <>
     <Container className="training-page my-4 my-md-5">
       <motion.div
         initial={{ opacity: 0, y: 20 }}
@@ -1276,19 +1275,19 @@ export default function TrainingForEngineers() {
                                   </div>
                                   <div className="mt-4">
                                     <Button
-                                      variant="warning"
+                                      variant="outline-warning"
                                       className="me-2"
                                       disabled={resetting}
-                                      onClick={handleCancelTraining}
+                                      onClick={() => setShowCancelConfirm(true)}
                                     >
                                       {resetting ? "Cancelling..." : "Cancel Training"}
                                     </Button>
                                     <Button
                                       variant="outline-danger"
                                       disabled={resetting}
-                                      onClick={handleForceResetTraining}
+                                      onClick={() => setShowForceResetConfirm(true)}
                                     >
-                                      {resetting ? "Resetting Training..." : "Training Stuck? Reset & Re-upload"}
+                                      {resetting ? "Resetting..." : "Training Stuck? Reset & Re-upload"}
                                     </Button>
                                   </div>
                                 </div>
@@ -1525,5 +1524,46 @@ export default function TrainingForEngineers() {
         </Row>
       </motion.div>
     </Container>
+
+    {/* Confirm Cancel Training */}
+    <Modal show={showCancelConfirm} onHide={() => setShowCancelConfirm(false)} centered size="sm">
+      <Modal.Header closeButton className="border-0">
+        <Modal.Title className="d-flex align-items-center gap-2 fs-6" style={{ fontWeight: 700 }}>
+          <FaExclamationTriangle className="text-warning" /> Cancel Training
+        </Modal.Title>
+      </Modal.Header>
+      <Modal.Body>
+        <p className="mb-0" style={{ fontSize: "0.9rem" }}>
+          Cancel the current training run? Progress will be lost.
+        </p>
+      </Modal.Body>
+      <Modal.Footer className="border-0 pt-0">
+        <Button variant="outline-secondary" size="sm" onClick={() => setShowCancelConfirm(false)}>Keep running</Button>
+        <Button variant="warning" size="sm" disabled={resetting} onClick={handleCancelTraining}>
+          {resetting ? "Cancelling..." : "Cancel training"}
+        </Button>
+      </Modal.Footer>
+    </Modal>
+
+    {/* Confirm Force Reset */}
+    <Modal show={showForceResetConfirm} onHide={() => setShowForceResetConfirm(false)} centered size="sm">
+      <Modal.Header closeButton className="border-0">
+        <Modal.Title className="d-flex align-items-center gap-2 fs-6" style={{ fontWeight: 700 }}>
+          <FaExclamationTriangle className="text-danger" /> Reset & Re-upload
+        </Modal.Title>
+      </Modal.Header>
+      <Modal.Body>
+        <p className="mb-0" style={{ fontSize: "0.9rem" }}>
+          This will reset all training progress and clear uploaded model artifacts. You will need to re-upload your CSV to start again.
+        </p>
+      </Modal.Body>
+      <Modal.Footer className="border-0 pt-0">
+        <Button variant="outline-secondary" size="sm" onClick={() => setShowForceResetConfirm(false)}>Cancel</Button>
+        <Button variant="danger" size="sm" disabled={resetting} onClick={handleForceResetTraining}>
+          {resetting ? "Resetting..." : "Reset & re-upload"}
+        </Button>
+      </Modal.Footer>
+    </Modal>
+    </>
   );
 }

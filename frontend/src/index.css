@@ -1,3 +1,5 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap");
+
 :root {
   --ink-950: #101b2d;
   --ink-900: #16233a;
@@ -42,6 +44,7 @@ body {
   font-size: 0.9375rem;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 button,
@@ -664,9 +667,12 @@ h6 {
   display: grid;
   place-items: center;
   background: #fafbf9 !important;
+  cursor: pointer;
+  transition: background 180ms ease, border-color 180ms ease;
 }
 
-.upload-area:hover {
+.upload-area:hover,
+.upload-area.drag-over {
   background: var(--accent-soft) !important;
   border-color: var(--accent-hover) !important;
 }
@@ -735,6 +741,30 @@ h6 {
   color: #aeb9c8;
   background: var(--ink-950);
   border-top: 1px solid #263852;
+}
+
+/* Scrollbar polish */
+* {
+  scrollbar-color: var(--line-strong) transparent;
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-500);
 }
 
 .app-footer-inner {

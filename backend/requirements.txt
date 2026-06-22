@@ -6,7 +6,7 @@ numpy==1.26.4
 pandas==2.2.3
 scikit-learn==1.6.1
 xgboost==2.1.4
-torch==2.3.0+cpu
+torch
 #pytorch-lightning==2.4.0
 shap==0.47.1
 optuna==4.2.1

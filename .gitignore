@@ -107,3 +107,4 @@ docs/RESUME.local.md
 .env*.local
 
 data/*
+backend/active_training_session.json
