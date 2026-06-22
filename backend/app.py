@@ -1,3 +1,7 @@
+import os
+# Fix macOS specific fork crash with Python Objective-C libraries (like matplotlib) under gunicorn
+os.environ["OBJC_DISABLE_INITIALIZE_FORK_SAFETY"] = "YES"
+
 from collections import OrderedDict
 import numpy as np
 import json
