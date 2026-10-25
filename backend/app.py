@@ -6,7 +6,6 @@ from collections import OrderedDict
 import numpy as np
 import json
 from sklearn.base import BaseEstimator
-from xgboost import XGBClassifier
 from flask_cors import CORS
 from flask import Flask, request, jsonify
 import joblib
@@ -20,7 +19,6 @@ from datetime import datetime
 from sqlalchemy import URL, create_engine
 import re
 import sys
-import torch
 import subprocess
 import threading
 from datetime import datetime
@@ -28,7 +26,6 @@ from typing import Dict, List, Any
 import time
 import uuid
 from config import get_db_config, get_row_limit
-from mlp_model import ChurnMLP
 
 # Flask App - Provides REST APIs for communication between the backend, Database, and Frontend React App.
 
@@ -306,30 +303,6 @@ def forget_model_artifacts(names=None) -> None:
         logger.warning(f"⚠️ Could not clear saved model artifacts: {e}")
 
 
-def compute_mlp_importance(model, features, data_path="processed_churn_data.csv") -> None:
-    """Compute MLP feature importance in this process (a separate process would
-    import torch again and can exhaust memory on free-tier hosts)."""
-    try:
-        df = pd.read_csv(data_path)
-        sample = df[features].sample(min(100, len(df)), random_state=42)
-
-        # Mean absolute gradient of the predicted churn probability with respect
-        # to each input feature, normalized to sum to 1.
-        model.eval()
-        inputs = torch.tensor(sample.values, dtype=torch.float32, requires_grad=True)
-        torch.sigmoid(model(inputs).squeeze()).mean().backward()
-        scores = inputs.grad.abs().mean(dim=0).numpy()
-        if scores.sum() == 0:
-            raise ValueError("all input gradients are zero")
-        scores = scores / scores.sum()
-        ranked = sorted(zip(features, scores), key=lambda item: item[1], reverse=True)
-        with open("MLP_importance.json", "w") as f:
-            json.dump({name: float(score) for name, score in ranked}, f)
-        logger.info("✅ MLP feature importance computed.")
-    except Exception as e:
-        logger.warning(f"⚠️ Could not compute MLP feature importance: {e}")
-
-
 restore_model_artifacts()
 
 
@@ -487,7 +460,24 @@ def _terminate_training_processes(training_id: str) -> None:
             logger.warning(f"⚠️ Failed to terminate process {pname} for {training_id}: {e}")
 
 
+# Training scripts each load torch or xgboost plus pandas and scikit-learn, a few
+# hundred MB apiece. Running them at the same time exceeds the 512 MB free tier, so
+# they queue and run one at a time. Raise TRAINING_CONCURRENCY on a larger instance.
+TRAINING_SLOT = threading.BoundedSemaphore(max(1, int(os.getenv("TRAINING_CONCURRENCY", "1"))))
+
+
 def _run_subprocess_with_cancellation(command, training_id: str, process_name: str, env=None) -> None:
+    # Wait for a free slot, staying responsive to cancellation while queued.
+    while not TRAINING_SLOT.acquire(timeout=1):
+        if _is_training_cancelled(training_id):
+            raise InterruptedError("Training cancelled")
+    try:
+        _run_subprocess_locked(command, training_id, process_name, env)
+    finally:
+        TRAINING_SLOT.release()
+
+
+def _run_subprocess_locked(command, training_id: str, process_name: str, env=None) -> None:
     if _is_training_cancelled(training_id):
         raise InterruptedError("Training cancelled")
 
@@ -570,6 +560,8 @@ def health_check():
 
 # Loads the XGBoost Model - Still has comparison functionality for feature development
 def load_model():
+    from xgboost import XGBClassifier  # imported lazily: ~90 MB the web process rarely needs
+
     # Check if there is even a model saved.
     if not os.path.exists(MODEL_PATH):
         logger.warning(
@@ -602,6 +594,10 @@ def load_model():
 
 # Loads the MLP Model
 def load_MLP_model():
+    # torch is imported lazily: it costs a few hundred MB, and the free tier has 512 MB.
+    import torch
+    from mlp_model import ChurnMLP
+
     #Check if there even is a model
     if not os.path.exists(MLP_MODEL_PATH) or not os.path.exists(MLP_FEATURES_PATH):
         logging.warning("⚠ MLP model or feature list not found.")
@@ -1224,6 +1220,7 @@ def predict_batch():
             df_device_numbers = None  # Handle case where the file is missing
 
         # Make predictions based on model type
+        from xgboost import XGBClassifier
         if isinstance(model, XGBClassifier):
             predictions_proba = model.predict_proba(df)[:, 1]  # XGBoost method
         else:
@@ -1623,9 +1620,8 @@ def train_model():
                         raise TimeoutError("Training token not created within timeout.")
                     time.sleep(2)  # wait 2 seconds and check again
                   
-                #Training done.   
-                _ = load_model()
-                
+                # Training done. The model is loaded on demand by the endpoints that need it;
+                # loading it here would keep xgboost resident in the web process.
                 # Signal Frontend. 
                 if os.path.exists("XGB_training_success_token.txt") and os.path.exists("model_metrics.json"):
                     with open("model_metrics.json", "r") as f:
@@ -1750,6 +1746,8 @@ def train_MLP_model():
             logger.info("🚀 Starting MLP training process...")
             train_env = os.environ.copy()
             train_env["MLP_TOTAL_EPOCHS"] = str(current_total_epochs)
+            # Fewer threads and malloc arenas keep the training process's memory down.
+            train_env.update({"OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1", "MALLOC_ARENA_MAX": "2"})
             _run_subprocess_with_cancellation(
                 [sys.executable, "MLP1.py", output_path],
                 training_id,
@@ -1771,11 +1769,7 @@ def train_MLP_model():
                 
             # Training done. Keep feature importance optional because spawning an
             # extra ML process can exhaust memory on free-tier deployments.
-            mlp_model, mlp_features = load_MLP_model()
-            app.config["MLP_model"] = mlp_model
             metrics_file = "MLP_metrics.json"
-            if mlp_model is not None:
-                compute_mlp_importance(mlp_model, mlp_features, output_path)
 
             # Signal to frontend end of training.
             if os.path.exists("MLP_training_success_token.txt") and os.path.exists(metrics_file):
@@ -1960,6 +1954,7 @@ def feature_importance():
         return jsonify({"error": "No trained model found. Please call /train_model first."}), 500
 
     try:
+        from xgboost import XGBClassifier
         if isinstance(model, XGBClassifier):
             importance = model.feature_importances_
             feature_names = model.get_booster().feature_names
