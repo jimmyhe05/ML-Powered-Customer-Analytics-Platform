@@ -34,6 +34,38 @@ if (!BASE_URL) {
   );
 }
 
+// Polling helper. A single failed poll used to abort the whole training flow
+// ("An error occurred during training.") even though the backend was still
+// training. Free hosting tiers drop or throttle requests (429) under load, and
+// those proxy responses carry no CORS header, so the browser reports them as
+// "Failed to fetch". Retry transient failures with backoff instead.
+const TRANSIENT_STATUSES = new Set([429, 500, 502, 503, 504]);
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function fetchJsonWithRetry(url, { retries = 5, baseDelay = 2000 } = {}) {
+  let lastError;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      const res = await fetch(url);
+      if (TRANSIENT_STATUSES.has(res.status) && attempt < retries) {
+        const retryAfter = Number(res.headers.get("Retry-After"));
+        await sleep(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : baseDelay * 2 ** attempt);
+        continue;
+      }
+      return await res.json();
+    } catch (err) {
+      // Network errors, including throttled responses blocked by CORS.
+      lastError = err;
+      if (attempt < retries) await sleep(baseDelay * 2 ** attempt);
+    }
+  }
+  throw lastError ?? new Error(`Request failed: ${url}`);
+}
+
+const POLL_INTERVAL_MS = 4000;
+const START_POLL_INTERVAL_MS = 1000;
+const START_TIMEOUT_MS = 30000;
+
 export default function TrainingForEngineers() {
   const [csvFile, setCsvFile] = useState(null);
   const [isTraining, setIsTraining] = useState(false);
@@ -42,6 +74,9 @@ export default function TrainingForEngineers() {
   const [dragging, setDragging] = useState(false);
   const [currentTrainingStage, setCurrentTrainingStage] = useState("");
   const progressIntervalRef = useRef(null);
+  // True while trainModel() is polling a run itself; the background sync pauses
+  // so the page doesn't send two sets of status requests at once.
+  const activePollingRef = useRef(false);
   const [error, setError] = useState(null);
   const [errorDetails, setErrorDetails] = useState(null);
   const [retryAttempted, setRetryAttempted] = useState(false);
@@ -125,7 +160,7 @@ export default function TrainingForEngineers() {
   }, []);
 
   const syncTrainingStateFromBackend = useCallback(async () => {
-    if (!BASE_URL) return;
+    if (!BASE_URL || activePollingRef.current) return;
 
     try {
       let xgbStatusData = null;
@@ -261,7 +296,7 @@ export default function TrainingForEngineers() {
     if (!BASE_URL) return;
 
     syncTrainingStateFromBackend();
-    const intervalId = setInterval(syncTrainingStateFromBackend, 2500);
+    const intervalId = setInterval(syncTrainingStateFromBackend, 5000);
 
     return () => clearInterval(intervalId);
   }, [syncTrainingStateFromBackend]);
@@ -398,19 +433,16 @@ export default function TrainingForEngineers() {
 
     const pollXGBTrainingStatus = () => {
       return new Promise((resolve, reject) => {
-        const pollInterval = 2000;
+        const pollInterval = POLL_INTERVAL_MS;
         const timeoutLimit = 600000;
         const startTime = Date.now();
 
         const checkStatus = async () => {
           try {
-            const res = await fetch(`${BASE_URL}/training_status_XGB`);
-            const data = await res.json();
-
-            const progressRes = await fetch(`${BASE_URL}/training_progress_XGB`);
-            const progressData = await progressRes.json();
-
-            console.log("XGBoost Status:", data, "Progress:", progressData);
+            // /training_status_XGB returns the progress file (current_trial,
+            // total_trials) while training, so one request covers both.
+            const data = await fetchJsonWithRetry(`${BASE_URL}/training_status_XGB`);
+            const progressData = data;
 
             if (progressData && typeof progressData.current_trial === "number") {
               const { current_trial, total_trials } = progressData;
@@ -459,19 +491,15 @@ export default function TrainingForEngineers() {
 
     const pollMLPTrainingStatus = () => {
       return new Promise((resolve, reject) => {
-        const pollInterval = 2000; // ms
+        const pollInterval = POLL_INTERVAL_MS;
         const timeoutLimit = 600000; // 10 min
         const startTime = Date.now();
 
         const checkStatus = async () => {
           try {
-            const res = await fetch(`${BASE_URL}/training_status_MLP`);
-            const data = await res.json();
-
-            const progressRes = await fetch(`${BASE_URL}/training_progress_MLP`);
-            const progressData = await progressRes.json();
-
-            console.log("Polling MLP Status:", data);
+            // /training_status_MLP returns current_epoch and total_epochs while training.
+            const data = await fetchJsonWithRetry(`${BASE_URL}/training_status_MLP`);
+            const progressData = data;
 
             if (progressData && typeof progressData.current_epoch === "number") {
               const { current_epoch, total_epochs } = progressData;
@@ -520,15 +548,14 @@ export default function TrainingForEngineers() {
 
 
     const waitForXGBTrainingToStart = async () => {
-      const pollInterval = 500; // half a second
-      const timeoutLimit = 10000; // 10 seconds
+      const pollInterval = START_POLL_INTERVAL_MS;
+      const timeoutLimit = START_TIMEOUT_MS;
       const startTime = Date.now();
 
       return new Promise((resolve, reject) => {
         const checkStatus = async () => {
           try {
-            const res = await fetch(`${BASE_URL}/training_status_XGB`);
-            const data = await res.json();
+            const data = await fetchJsonWithRetry(`${BASE_URL}/training_status_XGB`);
 
             if (data.status === "in_progress" || data.status === "completed") {
               resolve();
@@ -561,15 +588,14 @@ export default function TrainingForEngineers() {
     };
 
     const waitForMLPTrainingToStart = async () => {
-      const pollInterval = 500; // half a second
-      const timeoutLimit = 10000; // 10 seconds max
+      const pollInterval = START_POLL_INTERVAL_MS;
+      const timeoutLimit = START_TIMEOUT_MS;
       const startTime = Date.now();
 
       return new Promise((resolve, reject) => {
         const checkStatus = async () => {
           try {
-            const res = await fetch(`${BASE_URL}/training_status_MLP`);
-            const data = await res.json();
+            const data = await fetchJsonWithRetry(`${BASE_URL}/training_status_MLP`);
 
             if (data.status === "in_progress" || data.status === "completed") {
               resolve();
@@ -618,6 +644,7 @@ export default function TrainingForEngineers() {
     formData.append("speed_mode", speedMode);
 
     try {
+      activePollingRef.current = true;
       let activeSessionId = trainingSessionId;
       if (supportsSessionApi && !activeSessionId) {
         const sessionRes = await fetch(`${BASE_URL}/training_session`, {
@@ -781,6 +808,7 @@ export default function TrainingForEngineers() {
 
       setError(errorMsg);
     } finally {
+      activePollingRef.current = false;
       if (progressIntervalRef.current) {
         clearInterval(progressIntervalRef.current);
       }
