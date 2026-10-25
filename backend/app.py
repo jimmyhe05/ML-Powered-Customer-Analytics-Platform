@@ -192,6 +192,9 @@ MODEL_PATH = "best_churn_model.pkl" #Saved XGBoost Model
 MLP_MODEL_PATH = "MLP_churn_model.pt" #Saved MLP Model
 MLP_FEATURES_PATH = "trained_features_MLP.json" 
 FEATURES_JSON_PATH = "tracked_features.json"
+# XGBoost gets its own processed file so it never races the MLP thread,
+# which reads processed_churn_data.csv.
+XGB_PROCESSED_PATH = "processed_churn_data_xgb.csv"
 
 # Check environment
 DB_ROW_LIMIT = get_row_limit()
@@ -372,14 +375,26 @@ def _run_subprocess_with_cancellation(command, training_id: str, process_name: s
     if _is_training_cancelled(training_id):
         raise InterruptedError("Training cancelled")
 
+    # Send output to temp files, not pipes. With pipes that nobody reads until
+    # the process exits, a chatty script fills the ~64 KB pipe buffer and blocks
+    # forever, so training would sit at "in_progress".
+    import tempfile
+    stdout_file = tempfile.TemporaryFile(mode="w+")
+    stderr_file = tempfile.TemporaryFile(mode="w+")
     process = subprocess.Popen(
         command,
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=stdout_file,
+        stderr=stderr_file,
         text=True,
     )
     _register_training_process(training_id, process_name, process)
+
+    def communicate():
+        process.wait()
+        stdout_file.seek(0)
+        stderr_file.seek(0)
+        return stdout_file.read(), stderr_file.read()
 
     try:
         while True:
@@ -394,7 +409,7 @@ def _run_subprocess_with_cancellation(command, training_id: str, process_name: s
 
             return_code = process.poll()
             if return_code is not None:
-                stdout, stderr = process.communicate()
+                stdout, stderr = communicate()
                 if return_code != 0:
                     error_output = (stderr or stdout or "").strip()
                     raise RuntimeError(
@@ -409,6 +424,8 @@ def _run_subprocess_with_cancellation(command, training_id: str, process_name: s
             time.sleep(1)
     finally:
         _unregister_training_process(training_id, process_name)
+        stdout_file.close()
+        stderr_file.close()
 
 
 
@@ -615,7 +632,15 @@ def insert_or_update_devices(df, upload_file):
         # Process feature names robustly and ignore empty unnamed columns
         df = _normalize_dataframe_columns(df)
 
-        # Ensure no remain NA values. 
+        # `devices` is keyed by device_number. Files without one (like the full
+        # returns export) can't be stored here; training uses the processed file instead.
+        if 'device_number' not in df.columns or df['device_number'].isna().all():
+            logger.info("ℹ️ No device_number column; skipping devices table update.")
+            cursor.close()
+            conn.close()
+            return
+
+        # Ensure no remain NA values.
         if 'churn' in df.columns:
             df['churn'] = df['churn'].fillna(0).astype(int).astype('Int64')
             print("✅ churn value counts just before DB insert:")
@@ -984,7 +1009,7 @@ def reset_all():
             json.dump({"status": "not_started", "current_epoch": 0, "total_epochs": MLP_TOTAL_EPOCHS}, f)
 
         # Delete saved training files. 
-        model_files = ["best_churn_model.pkl", "MLP_churn_model.pt", "trained_features.json", "trained_features_MLP.json", "MLP_metrics.json", "model_metrics.json", "MLP_importance.json", "processed_churn_data.csv", "MLP_training_success_token.txt", "XGB_training_success_token.txt"]
+        model_files = ["best_churn_model.pkl", "MLP_churn_model.pt", "trained_features.json", "trained_features_MLP.json", "MLP_metrics.json", "model_metrics.json", "MLP_importance.json", "processed_churn_data.csv", XGB_PROCESSED_PATH, "MLP_training_success_token.txt", "XGB_training_success_token.txt"]
         for f in model_files:
             if os.path.exists(f):
                 os.remove(f)
@@ -1366,6 +1391,7 @@ def reset_training_state():
             "trained_features_MLP.json",
             "MLP_importance.json",
             "processed_churn_data.csv",
+            XGB_PROCESSED_PATH,
             "temp_device_numbers.csv",
         ]
 
@@ -1433,23 +1459,21 @@ def train_model():
         except Exception as db_error:
             logger.warning(f"⚠️ DB update failed: {db_error}")
 
-        # Store processed features too for feature heatmap. 
+        # Process the uploaded file once. XGBoost trains on this processed copy
+        # (the same data the MLP uses) instead of re-reading the `devices` table,
+        # which only holds files that have a device number column.
         file.seek(0)
         df = load_data(file, "train")
+        df.to_csv(XGB_PROCESSED_PATH, index=False)
+
+        # Store processed features too for feature heatmap.
         create_processed_features_table(df, overwrite=True)
         insert_processed_features(df, upload_file=file.filename)
         logger.info("Stored Data in database!")
 
         def run_training():
             try:
-                # Train XGBoost on processed data from the database.
-                input_path = "from_db"
-                output_path = "processed_churn_data.csv"
-                _run_subprocess_with_cancellation(
-                    [sys.executable, "data_processing.py", input_path, output_path, "train"],
-                    training_id,
-                    "xgb_data_processing",
-                )
+                output_path = XGB_PROCESSED_PATH
                 df = pd.read_csv(output_path)
                 
                 # Churn column required
@@ -1512,6 +1536,11 @@ def train_model():
 
     except Exception as e:
         logger.error(f"❌ Unexpected error starting XGBoost training: {e}")
+        # Don't leave the status at "in_progress", or every later request is
+        # rejected with "XGBoost training already in progress."
+        with open("xgb_training_progress.json", "w") as f:
+            json.dump({"status": "error", "current_trial": 0, "total_trials": current_total_trials, "message": str(e)}, f)
+        _update_training_session(training_id)
         return jsonify({"error": str(e)}), 500
 
 
@@ -1908,6 +1937,12 @@ def insert_dashboard_data(df, upload_file):
                 cursor.execute(f'ALTER TABLE dashboard_devices ADD COLUMN "{col}" TEXT;')
                 logger.info(f"🆕 Added new column to dashboard_devices: {col}")
                 existing_cols.add(col)
+
+        # Without device numbers, ON CONFLICT never matches, so re-uploading the
+        # same file (or the frontend retrying a slow upload) would duplicate every
+        # row and inflate the charts. Replace that file's rows instead.
+        if 'device_number' not in df.columns or df['device_number'].isna().all():
+            cursor.execute("DELETE FROM dashboard_devices WHERE upload_file = %s;", (upload_file,))
 
         # Attach metadata
         df.loc[:, 'upload_file'] = upload_file
