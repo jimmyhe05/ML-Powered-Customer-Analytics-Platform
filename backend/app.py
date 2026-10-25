@@ -216,6 +216,122 @@ engine = create_engine(URL.create(
     database=DB_CONFIG["dbname"],
 ))
 
+# Trained models are written to local disk, which Render wipes on every restart
+# and redeploy (free tier also restarts after idling). A copy of each artifact is
+# kept in Postgres and restored at startup, so the dashboard keeps its models.
+MODEL_ARTIFACT_FILES = [
+    MODEL_PATH,
+    MLP_MODEL_PATH,
+    "trained_features.json",
+    MLP_FEATURES_PATH,
+    "model_metrics.json",
+    "MLP_metrics.json",
+    "MLP_importance.json",
+]
+
+
+def _artifact_connection():
+    return psycopg2.connect(**{**DB_CONFIG, "connect_timeout": 10})
+
+
+def persist_model_artifacts() -> None:
+    """Upsert every existing model artifact into the model_artifacts table."""
+    names = [name for name in MODEL_ARTIFACT_FILES if os.path.exists(name)]
+    if not names:
+        return
+    try:
+        conn = _artifact_connection()
+        try:
+            with conn, conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS model_artifacts (
+                        name TEXT PRIMARY KEY,
+                        data BYTEA NOT NULL,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )
+                """)
+                for name in names:
+                    with open(name, "rb") as f:
+                        payload = psycopg2.Binary(f.read())
+                    cur.execute("""
+                        INSERT INTO model_artifacts (name, data) VALUES (%s, %s)
+                        ON CONFLICT (name) DO UPDATE
+                        SET data = EXCLUDED.data, updated_at = now()
+                    """, (name, payload))
+        finally:
+            conn.close()
+        logger.info(f"💾 Saved model artifacts to database: {', '.join(names)}")
+    except Exception as e:
+        logger.warning(f"⚠️ Could not save model artifacts to database: {e}")
+
+
+def restore_model_artifacts() -> None:
+    """Write saved artifacts back to disk. Called once at startup, so the database
+    copy (the latest training run) replaces anything shipped in the image."""
+    try:
+        conn = _artifact_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT to_regclass('model_artifacts')")
+                if cur.fetchone()[0] is None:
+                    return
+                cur.execute("SELECT name, data FROM model_artifacts WHERE name = ANY(%s)",
+                            (MODEL_ARTIFACT_FILES,))
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        for name, data in rows:
+            with open(name, "wb") as f:
+                f.write(bytes(data))
+        if rows:
+            logger.info(f"♻️ Restored model artifacts from database: {', '.join(r[0] for r in rows)}")
+    except Exception as e:
+        logger.warning(f"⚠️ Could not restore model artifacts from database: {e}")
+
+
+def forget_model_artifacts(names=None) -> None:
+    """Delete saved artifacts so a reset is not undone by the next restart."""
+    try:
+        conn = _artifact_connection()
+        try:
+            with conn, conn.cursor() as cur:
+                cur.execute("SELECT to_regclass('model_artifacts')")
+                if cur.fetchone()[0] is None:
+                    return
+                cur.execute("DELETE FROM model_artifacts WHERE name = ANY(%s)",
+                            (list(names or MODEL_ARTIFACT_FILES),))
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"⚠️ Could not clear saved model artifacts: {e}")
+
+
+def compute_mlp_importance(model, features, data_path="processed_churn_data.csv") -> None:
+    """Compute MLP feature importance in this process (a separate process would
+    import torch again and can exhaust memory on free-tier hosts)."""
+    try:
+        df = pd.read_csv(data_path)
+        sample = df[features].sample(min(100, len(df)), random_state=42)
+
+        # Mean absolute gradient of the predicted churn probability with respect
+        # to each input feature, normalized to sum to 1.
+        model.eval()
+        inputs = torch.tensor(sample.values, dtype=torch.float32, requires_grad=True)
+        torch.sigmoid(model(inputs).squeeze()).mean().backward()
+        scores = inputs.grad.abs().mean(dim=0).numpy()
+        if scores.sum() == 0:
+            raise ValueError("all input gradients are zero")
+        scores = scores / scores.sum()
+        ranked = sorted(zip(features, scores), key=lambda item: item[1], reverse=True)
+        with open("MLP_importance.json", "w") as f:
+            json.dump({name: float(score) for name, score in ranked}, f)
+        logger.info("✅ MLP feature importance computed.")
+    except Exception as e:
+        logger.warning(f"⚠️ Could not compute MLP feature importance: {e}")
+
+
+restore_model_artifacts()
+
 
 def normalize_speed_mode(value: str) -> str:
     mode = (value or "").strip().lower()
@@ -508,6 +624,7 @@ def load_MLP_model():
 def cleanup_models_route():
     from model_cleanup import cleanup_model_files
     result = cleanup_model_files()
+    forget_model_artifacts()
     return jsonify(result)
 
 
@@ -682,6 +799,7 @@ def insert_or_update_devices(df, upload_file):
         # If new columns were added, delete the current trained model to force retraining
         if new_columns_added and os.path.exists(MODEL_PATH):
             os.remove(MODEL_PATH)
+            forget_model_artifacts([MODEL_PATH])
             logger.warning(
                 "🗑️ Deleted best_churn_model.pkl due to schema change (new features detected).")
 
@@ -1014,6 +1132,7 @@ def reset_all():
             if os.path.exists(f):
                 os.remove(f)
                 logger.info(f"🗑️ Deleted model file: {f}")
+        forget_model_artifacts()
 
         # Clear database tables
         conn = psycopg2.connect(**DB_CONFIG)
@@ -1398,6 +1517,7 @@ def reset_training_state():
         for artifact in artifacts_to_delete:
             if os.path.exists(artifact):
                 os.remove(artifact)
+        forget_model_artifacts()
 
         _clear_training_session()
 
@@ -1510,6 +1630,7 @@ def train_model():
                 if os.path.exists("XGB_training_success_token.txt") and os.path.exists("model_metrics.json"):
                     with open("model_metrics.json", "r") as f:
                         metrics = json.load(f)
+                    persist_model_artifacts()
                     with open("xgb_training_progress.json", "w") as f:
                         json.dump({"status": "completed", "current_trial": current_total_trials, "total_trials": current_total_trials}, f)
                     _update_training_session(training_id)
@@ -1650,13 +1771,17 @@ def train_MLP_model():
                 
             # Training done. Keep feature importance optional because spawning an
             # extra ML process can exhaust memory on free-tier deployments.
-            app.config["MLP_model"], _ = load_MLP_model()
+            mlp_model, mlp_features = load_MLP_model()
+            app.config["MLP_model"] = mlp_model
             metrics_file = "MLP_metrics.json"
-            
-            # Signal to frontend end of training. 
+            if mlp_model is not None:
+                compute_mlp_importance(mlp_model, mlp_features, output_path)
+
+            # Signal to frontend end of training.
             if os.path.exists("MLP_training_success_token.txt") and os.path.exists(metrics_file):
                 with open(metrics_file, "r") as f:
                     metrics = json.load(f)
+                persist_model_artifacts()
                 _update_training_session(training_id)
             else:
                 logger.error("❌ MLP training failed: missing success token or metrics file")
