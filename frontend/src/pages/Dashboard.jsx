@@ -34,6 +34,7 @@ import {
 } from "../components/charts";
 import { formatFeatureName } from "../components/charts/utils";
 import { useToast } from "../components/Toast";
+import { isCsvFile, isCsvOrXlsxFile } from "../utils/fileTypes";
 
 const emptyReturnAnalysis = {
   source_distribution: [],
@@ -166,7 +167,7 @@ export default function Dashboard() {
 
   const handleDashboardFileSelect = (event) => {
     const file = event.target.files[0];
-    if (file && (file.type === "text/csv" || file.type === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")) {
+    if (isCsvOrXlsxFile(file)) {
       setDashboardFile(file);
     } else {
       toast({ message: "Please upload a valid CSV or XLSX file.", variant: "warning" });
@@ -472,7 +473,7 @@ export default function Dashboard() {
     event.preventDefault();
     setDragging(false);
     const file = event.dataTransfer.files[0];
-    if (file && file.type === "text/csv") {
+    if (isCsvFile(file)) {
       setSelectedFile(file);
     } else {
       toast({ message: "Please upload a valid CSV file.", variant: "warning" });
@@ -482,7 +483,7 @@ export default function Dashboard() {
   // Handle File Selection
   const handleFileSelect = (event) => {
     const file = event.target.files[0];
-    if (file && file.type === "text/csv") {
+    if (isCsvFile(file)) {
       setSelectedFile(file);
     } else {
       toast({ message: "Please upload a valid CSV file.", variant: "warning" });

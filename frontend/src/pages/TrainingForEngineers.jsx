@@ -17,6 +17,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import PropTypes from "prop-types";
 import { FaCloudUploadAlt, FaExclamationTriangle } from "react-icons/fa";
 import { useToast } from "../components/Toast";
+import { isCsvFile } from "../utils/fileTypes";
 
 const rawApiUrl = import.meta.env.VITE_API_URL?.trim();
 const BASE_URL = rawApiUrl
@@ -270,17 +271,21 @@ export default function TrainingForEngineers() {
     setDragging(false);
     const file = event.dataTransfer.files[0];
 
-    if (file && file.type === "text/csv") {
+    if (isCsvFile(file)) {
       setCsvFile(file);
       parseCSV(file);
+    } else if (file) {
+      toast({ message: "Please upload a valid CSV file.", variant: "warning" });
     }
   };
 
   const handleFileSelect = (event) => {
     const file = event.target.files[0];
-    if (file && file.type === "text/csv") {
+    if (isCsvFile(file)) {
       setCsvFile(file);
       parseCSV(file);
+    } else if (file) {
+      toast({ message: "Please upload a valid CSV file.", variant: "warning" });
     }
   };
 
