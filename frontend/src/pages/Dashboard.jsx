@@ -66,27 +66,40 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const transientStatuses = new Set([408, 429, 500, 502, 503, 504]);
 
 const apiFetch = async (url, options = {}, retryOptions = {}) => {
+  const isGet = !options.method || options.method.toUpperCase() === "GET";
   const {
     retries = 3,
     baseDelay = 1500,
     retryStatuses = transientStatuses,
+    // A hung backend would otherwise keep the full-screen loader up forever.
+    // Reads time out; uploads and deletes (which can legitimately run long) do not.
+    timeoutMs = isGet ? 45000 : 0,
   } = retryOptions;
 
   let lastError;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const controller = timeoutMs && !options.signal ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
     try {
-      const response = await fetch(url, options);
+      const response = await fetch(
+        url,
+        controller ? { ...options, signal: controller.signal } : options
+      );
       if (!response.ok && retryStatuses.has(response.status) && attempt < retries) {
         await sleep(baseDelay * (attempt + 1));
         continue;
       }
       return response;
     } catch (error) {
-      lastError = error;
+      lastError = error?.name === "AbortError"
+        ? new Error(`Request timed out after ${timeoutMs / 1000}s: ${url.split("/").pop()}`)
+        : error;
       if (attempt >= retries) {
-        throw error;
+        throw lastError;
       }
       await sleep(baseDelay * (attempt + 1));
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
   throw lastError || new Error("Request failed");
@@ -362,7 +375,7 @@ export default function Dashboard() {
 
     // Fetch Dashboard Data
     console.log(`${BASE_URL}/dashboard_data`);
-    apiJson(`${BASE_URL}/dashboard_data`, {}, { retries: 4, baseDelay: 2000 })
+    apiJson(`${BASE_URL}/dashboard_data`, {}, { retries: 4, baseDelay: 2000, timeoutMs: 30000 })
       .then((data) => {
         if (!data || !Array.isArray(data.app_usage_percentages)) {
           throw new Error(data?.error || "Invalid dashboard_data response");
