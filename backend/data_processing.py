@@ -11,6 +11,7 @@ from sklearn.compose import ColumnTransformer
 from sqlalchemy import URL
 import time
 from config import get_db_config, get_row_limit
+from column_utils import collapse_duplicate_columns
 
 
 # Processes data for the AI models. 
@@ -188,7 +189,7 @@ def preprocess_data(input_file, output_file, mode="train"):
     if df.columns.duplicated().any():
         duplicate_cols = sorted(set(df.columns[df.columns.duplicated()].tolist()))
         print(f"⚠️ Duplicate columns after normalization collapsed: {duplicate_cols}")
-        df = df.T.groupby(level=0, sort=False).first().T
+        df = collapse_duplicate_columns(df)
 
     # Print altered names for debugging
     print(f"Columns after loading and normalization: {df.columns.tolist()}")

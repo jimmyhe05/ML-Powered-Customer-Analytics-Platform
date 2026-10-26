@@ -25,7 +25,9 @@ from datetime import datetime
 from typing import Dict, List, Any
 import time
 import uuid
+import shutil
 from config import get_db_config, get_row_limit
+from column_utils import collapse_duplicate_columns
 
 # Flask App - Provides REST APIs for communication between the backend, Database, and Frontend React App.
 
@@ -168,7 +170,7 @@ def _normalize_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df.columns.duplicated().any():
         duplicate_cols = sorted(set(df.columns[df.columns.duplicated()].tolist()))
         logger.warning(f"⚠️ Duplicate columns after normalization collapsed: {duplicate_cols}")
-        df = df.T.groupby(level=0, sort=False).first().T
+        df = collapse_duplicate_columns(df)
 
     return df
 
@@ -319,10 +321,30 @@ def mlp_epochs_for_mode(mode: str) -> int:
     return FAST_MLP_TOTAL_EPOCHS if mode == "fast" else MLP_TOTAL_EPOCHS
 
 
+def _load_json_retry(file_path: str, attempts: int = 4) -> Dict[str, Any]:
+    """json.load that tolerates catching a writer between truncate and write (the
+    progress files are rewritten constantly by the web app and the training scripts).
+    A partial read would otherwise surface as a bogus {"status": "error"}."""
+    for attempt in range(attempts):
+        try:
+            with open(file_path, "r") as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.05)
+
+
+def _write_json_atomic(file_path: str, payload: Dict[str, Any]) -> None:
+    tmp_path = f"{file_path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(payload, f)
+    os.replace(tmp_path, file_path)
+
+
 def _read_json_file(file_path: str, default: Dict[str, Any]) -> Dict[str, Any]:
     try:
-        with open(file_path, "r") as f:
-            return json.load(f)
+        return _load_json_retry(file_path)
     except Exception:
         return default
 
@@ -517,7 +539,9 @@ def _run_subprocess_locked(command, training_id: str, process_name: str, env=Non
             if return_code is not None:
                 stdout, stderr = communicate()
                 if return_code != 0:
-                    error_output = (stderr or stdout or "").strip()
+                    # Keep the tail: the real error (e.g. a ValueError) is the last line,
+                    # and this text is shown to the user in the training page.
+                    error_output = (stderr or stdout or "").strip()[-700:]
                     raise RuntimeError(
                         f"{process_name} failed with exit code {return_code}: {error_output}"
                     )
@@ -533,6 +557,142 @@ def _run_subprocess_locked(command, training_id: str, process_name: str, env=Non
         stdout_file.close()
         stderr_file.close()
 
+
+
+
+# =======================================================================================
+# Training upload preparation
+# =======================================================================================
+# Preparing a full-database upload (parsing, saving devices, feature processing, saving
+# processed features) can take minutes. It used to run inside the POST request, so the UI
+# showed nothing until it returned, and a crash mid-way left the progress file at
+# "in_progress" forever, which made every later request answer "already in progress".
+# Preparation now runs in the background thread, reports a phase through the progress
+# file, and an in_progress status only counts if something is actually still running.
+
+XGB_PROGRESS_FILE = "xgb_training_progress.json"
+MLP_PROGRESS_FILE = "mlp_training_progress.json"
+_TRAINING_OWNER_FILES = {"xgb": "xgb_training_owner.json", "mlp": "mlp_training_owner.json"}
+_TRAINING_PROGRESS_FILES = {"xgb": XGB_PROGRESS_FILE, "mlp": MLP_PROGRESS_FILE}
+_TRAINING_THREADS: Dict[str, threading.Thread] = {}
+# training_id -> (filename, size, processed csv path) for an upload the XGBoost run already prepared
+_PREPARED_UPLOADS: Dict[str, tuple] = {}
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _claim_training(kind: str, thread: threading.Thread) -> None:
+    _TRAINING_THREADS[kind] = thread
+    with open(_TRAINING_OWNER_FILES[kind], "w") as f:
+        json.dump({"pid": os.getpid()}, f)
+
+
+def _training_really_running(kind: str) -> bool:
+    """True only if the progress file says in_progress AND a live thread or worker owns it."""
+    progress = _read_json_file(_TRAINING_PROGRESS_FILES[kind], {})
+    if progress.get("status") != "in_progress":
+        return False
+
+    thread = _TRAINING_THREADS.get(kind)
+    if thread is not None and thread.is_alive():
+        return True
+
+    owner_pid = _read_json_file(_TRAINING_OWNER_FILES[kind], {}).get("pid")
+    if owner_pid and owner_pid != os.getpid() and _pid_alive(owner_pid):
+        return True  # another gunicorn worker is running it
+
+    logger.warning("Ignoring stale %s in_progress status; no live training owns it.", kind)
+    return False
+
+
+def _write_prep_phase(kind: str, training_id: str, base: Dict[str, Any], phase: str) -> None:
+    if _is_training_cancelled(training_id):
+        raise InterruptedError("Training cancelled")
+    logger.info("[%s prep] %s", kind, phase)
+    _write_json_atomic(_TRAINING_PROGRESS_FILES[kind], {"status": "in_progress", **base, "phase": phase})
+
+
+def _save_upload(file, kind: str) -> str:
+    """Write the uploaded file to disk so a background thread can use it after the request ends."""
+    from werkzeug.utils import secure_filename
+    name = secure_filename(file.filename or "") or "upload.csv"
+    path = f"upload_{kind}_{uuid.uuid4().hex[:8]}_{name}"
+    file.save(path)
+    return path
+
+
+def _prepare_training_data(upload_path: str, filename: str, processed_path: str,
+                           training_id: str, kind: str, base: Dict[str, Any]) -> None:
+    """Parse the upload, store it, and write the model-ready CSV to processed_path."""
+    phase = lambda text: _write_prep_phase(kind, training_id, base, text)
+
+    phase("Reading uploaded file")
+    df_raw = pd.read_csv(upload_path)
+    df_raw.columns = df_raw.columns.str.lower().str.strip().str.replace(" ", "_")
+    if "product/model_#" in df_raw.columns:
+        df_raw.rename(columns={"product/model_#": "product_model"}, inplace=True)
+
+    for col in df_raw.columns:
+        if 'date' in col.lower():
+            df_raw[col] = df_raw[col].apply(normalize_arabic_digits)
+            df_raw[col] = pd.to_datetime(df_raw[col], errors="coerce")
+            df_raw[col] = df_raw[col].dt.strftime('%Y-%m-%d %H:%M:%S')
+            df_raw[col] = df_raw[col].replace({np.nan: None})
+
+    for col in ['promotion_email', 'register_email']:
+        if col in df_raw.columns:
+            df_raw[col] = pd.to_numeric(df_raw[col], errors='coerce').fillna(0).astype(int)
+
+    phase("Saving device records")
+    try:
+        insert_or_update_devices(df_raw, filename)
+    except Exception as db_error:
+        logger.warning(f"⚠️ DB update failed: {db_error}")
+    del df_raw
+    _release_memory()
+
+    phase("Processing features")
+    _run_subprocess_with_cancellation(
+        [sys.executable, "data_processing.py", upload_path, processed_path, "train"],
+        training_id,
+        f"{kind}_data_processing",
+    )
+
+    phase("Saving processed features")
+    df = pd.read_csv(processed_path)
+    create_processed_features_table(df, overwrite=True)
+    insert_processed_features(df, upload_file=filename)
+    logger.info("Stored processed training data in database (%d rows).", len(df))
+    del df
+    _release_memory()
+
+
+def _release_memory() -> None:
+    """Hand freed pandas/psycopg2 memory back to the OS (glibc keeps it in arenas otherwise).
+    Matters on the 512 MB free tier, where a big upload's leftovers can push the worker over."""
+    import gc
+    gc.collect()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+
+
+def _remove_quietly(path: str | None) -> None:
+    if path and os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 # =======================================================================================
@@ -819,7 +979,13 @@ def insert_or_update_devices(df, upload_file):
                     f"⚠️ Failed to update {FEATURES_JSON_PATH}: {e}")
 
         # Fetch existing data for imputation on new columns
-        df_existing = pd.read_sql("SELECT * FROM devices;", conn)
+        # Only the uploaded columns are needed, not the whole (wide) table.
+        existing_in_upload = [c for c in df.columns if c in existing_schema]
+        if existing_in_upload:
+            select_cols = ", ".join(f'"{c}"' for c in existing_in_upload)
+            df_existing = pd.read_sql(f"SELECT {select_cols} FROM devices;", conn)
+        else:
+            df_existing = pd.DataFrame()
         impute_values = {}
 
         for col in df.columns:
@@ -862,7 +1028,7 @@ def insert_or_update_devices(df, upload_file):
         {update_clause};
         """
 
-        execute_batch(cursor, insert_query, df[insert_columns].values.tolist())
+        execute_batch(cursor, insert_query, df[insert_columns].values.tolist(), page_size=1000)
         conn.commit()
 
         cursor.execute("SELECT COUNT(*) FROM devices;")
@@ -1022,7 +1188,7 @@ def insert_processed_features(df, upload_file, table_name="processed_features"):
 
     conn = psycopg2.connect(**DB_CONFIG)
     cursor = conn.cursor()
-    execute_batch(cursor, insert_stmt, df_copy.values.tolist())
+    execute_batch(cursor, insert_stmt, df_copy.values.tolist(), page_size=1000)
     conn.commit()
     cursor.close()
     conn.close()
@@ -1529,6 +1695,10 @@ def reset_training_state():
 #Train XGBoost in background thread
 @app.route('/train_model', methods=['POST'])
 def train_model():
+    """Starts XGBoost training in a background thread and returns immediately.
+
+    The upload is saved to disk here; parsing, storing and processing it happens in the
+    thread and is reported through xgb_training_progress.json ("phase")."""
     speed_mode = normalize_speed_mode(request.form.get("speed_mode"))
     current_total_trials = xgb_trials_for_mode(speed_mode)
     requested_training_id = request.form.get("training_id")
@@ -1536,134 +1706,101 @@ def train_model():
     training_id = session["training_id"]
     _update_training_session(training_id, speed_mode=speed_mode)
 
-    if os.path.exists("xgb_training_progress.json"):
-        with open("xgb_training_progress.json", "r") as f:
-            status = json.load(f).get("status", "not_started")
-        if status == "in_progress":
-            return jsonify({"message": "XGBoost training already in progress."}), 202
+    if _training_really_running("xgb"):
+        return jsonify({"message": "XGBoost training already in progress.", "training_id": training_id}), 202
 
-    # Mark training as started
-    with open("xgb_training_progress.json", "w") as f:
-        json.dump({"status": "in_progress", "current_trial": 0, "total_trials": current_total_trials}, f)
+    file = request.files.get('file')
+    if file is None:
+        return jsonify({"error": "No file uploaded."}), 400
 
-    """Handles XGBoost model training using a background thread."""
-    
-    # Store file data into the database. 
+    base = {"current_trial": 0, "total_trials": current_total_trials}
+    filename = file.filename or "upload.csv"
     try:
-        file = request.files['file']
-        df_raw = pd.read_csv(file)
-        
-        # Process feature names 
-        df_raw.columns = df_raw.columns.str.lower().str.strip().str.replace(" ", "_")
-        if "product/model_#" in df_raw.columns:
-            df_raw.rename(columns={"product/model_#": "product_model"}, inplace=True)
-                          
-        #Process data for database insertion
-        for col in df_raw.columns:
-            if 'date' in col.lower():
-                df_raw[col] = df_raw[col].apply(normalize_arabic_digits)
-                df_raw[col] = pd.to_datetime(df_raw[col], errors="coerce")
-                df_raw[col] = df_raw[col].dt.strftime('%Y-%m-%d %H:%M:%S')
-                df_raw[col] = df_raw[col].replace({np.nan: None})
-
-        for col in ['promotion_email', 'register_email']:
-            if col in df_raw.columns:
-                df_raw[col] = pd.to_numeric(
-                    df_raw[col], errors='coerce').fillna(0).astype(int)
-
-        try:
-            insert_or_update_devices(df_raw, file.filename)
-        except Exception as db_error:
-            logger.warning(f"⚠️ DB update failed: {db_error}")
-
-        # Process the uploaded file once. XGBoost trains on this processed copy
-        # (the same data the MLP uses) instead of re-reading the `devices` table,
-        # which only holds files that have a device number column.
-        file.seek(0)
-        df = load_data(file, "train")
-        df.to_csv(XGB_PROCESSED_PATH, index=False)
-
-        # Store processed features too for feature heatmap.
-        create_processed_features_table(df, overwrite=True)
-        insert_processed_features(df, upload_file=file.filename)
-        logger.info("Stored Data in database!")
-
-        def run_training():
-            try:
-                output_path = XGB_PROCESSED_PATH
-                df = pd.read_csv(output_path)
-                
-                # Churn column required
-                if 'churn' not in df.columns:
-                    with open("xgb_training_progress.json", "w") as f:
-                        json.dump({"status": "error", "current_trial": 0, "total_trials": current_total_trials}, f)
-                    _update_training_session(training_id)
-                    return
-
-                train_env = os.environ.copy()
-                train_env["XGB_TOTAL_TRIALS"] = str(current_total_trials)
-                _run_subprocess_with_cancellation(
-                    [sys.executable, "train.py", output_path],
-                    training_id,
-                    "xgb_training",
-                    env=train_env,
-                )
-
-                # Poll for end of training. 
-                timeout = 600  # seconds
-                start_time = time.time()
-
-                while not os.path.exists("XGB_training_success_token.txt"):
-                    if _is_training_cancelled(training_id):
-                        raise InterruptedError("Training cancelled")
-                    if time.time() - start_time > timeout:
-                        raise TimeoutError("Training token not created within timeout.")
-                    time.sleep(2)  # wait 2 seconds and check again
-                  
-                # Training done. The model is loaded on demand by the endpoints that need it;
-                # loading it here would keep xgboost resident in the web process.
-                # Signal Frontend. 
-                if os.path.exists("XGB_training_success_token.txt") and os.path.exists("model_metrics.json"):
-                    with open("model_metrics.json", "r") as f:
-                        metrics = json.load(f)
-                    persist_model_artifacts()
-                    with open("xgb_training_progress.json", "w") as f:
-                        json.dump({"status": "completed", "current_trial": current_total_trials, "total_trials": current_total_trials}, f)
-                    _update_training_session(training_id)
-                else:
-                    with open("xgb_training_progress.json", "w") as f:
-                        json.dump({"status": "error", "current_trial": 0, "total_trials": current_total_trials}, f)
-                    _update_training_session(training_id)
-
-            except InterruptedError:
-                with open("xgb_training_progress.json", "w") as f:
-                    json.dump({"status": "cancelled", "current_trial": 0, "total_trials": current_total_trials}, f)
-                _update_training_session(training_id, cancelled=True)
-            except Exception as e:
-                logger.error(f"❌ XGBoost training failed: {e}")
-                with open("xgb_training_progress.json", "w") as f:
-                    json.dump({"status": "error", "current_trial": 0, "total_trials": current_total_trials}, f)
-                _update_training_session(training_id)
-
-        # Start background thread and return immediately
-        thread = threading.Thread(target=run_training)
-        thread.start()
-
-        return jsonify({"message": "🚀 XGBoost training started.", "training_id": training_id}), 202
-
+        upload_path = _save_upload(file, "xgb")
+        upload_size = os.path.getsize(upload_path)
     except Exception as e:
-        logger.error(f"❌ Unexpected error starting XGBoost training: {e}")
-        # Don't leave the status at "in_progress", or every later request is
-        # rejected with "XGBoost training already in progress."
-        with open("xgb_training_progress.json", "w") as f:
-            json.dump({"status": "error", "current_trial": 0, "total_trials": current_total_trials, "message": str(e)}, f)
+        logger.error(f"❌ Could not save XGBoost training upload: {e}")
+        with open(XGB_PROGRESS_FILE, "w") as f:
+            json.dump({"status": "error", **base, "message": str(e)}, f)
         _update_training_session(training_id)
         return jsonify({"error": str(e)}), 500
+
+    _PREPARED_UPLOADS.pop(training_id, None)
+    with open(XGB_PROGRESS_FILE, "w") as f:
+        json.dump({"status": "in_progress", **base, "phase": "Queued"}, f)
+
+    def run_training():
+        try:
+            _prepare_training_data(upload_path, filename, XGB_PROCESSED_PATH, training_id, "xgb", base)
+            _PREPARED_UPLOADS[training_id] = (filename, upload_size, XGB_PROCESSED_PATH)
+
+            output_path = XGB_PROCESSED_PATH
+            header = pd.read_csv(output_path, nrows=0)
+            if 'churn' not in header.columns:
+                with open(XGB_PROGRESS_FILE, "w") as f:
+                    json.dump({"status": "error", **base,
+                               "message": "Processed training data is missing the churn column."}, f)
+                _update_training_session(training_id)
+                return
+
+            _write_prep_phase("xgb", training_id, base, "Training XGBoost model")
+            train_env = os.environ.copy()
+            train_env["XGB_TOTAL_TRIALS"] = str(current_total_trials)
+            _run_subprocess_with_cancellation(
+                [sys.executable, "train.py", output_path],
+                training_id,
+                "xgb_training",
+                env=train_env,
+            )
+
+            # Poll for end of training.
+            timeout = 600  # seconds
+            start_time = time.time()
+
+            while not os.path.exists("XGB_training_success_token.txt"):
+                if _is_training_cancelled(training_id):
+                    raise InterruptedError("Training cancelled")
+                if time.time() - start_time > timeout:
+                    raise TimeoutError("Training token not created within timeout.")
+                time.sleep(2)  # wait 2 seconds and check again
+
+            # Training done. The model is loaded on demand by the endpoints that need it;
+            # loading it here would keep xgboost resident in the web process.
+            if os.path.exists("XGB_training_success_token.txt") and os.path.exists("model_metrics.json"):
+                persist_model_artifacts()
+                with open(XGB_PROGRESS_FILE, "w") as f:
+                    json.dump({"status": "completed", "current_trial": current_total_trials,
+                               "total_trials": current_total_trials}, f)
+                _update_training_session(training_id)
+            else:
+                with open(XGB_PROGRESS_FILE, "w") as f:
+                    json.dump({"status": "error", **base,
+                               "message": "XGBoost training finished without producing metrics."}, f)
+                _update_training_session(training_id)
+
+        except InterruptedError:
+            with open(XGB_PROGRESS_FILE, "w") as f:
+                json.dump({"status": "cancelled", **base}, f)
+            _update_training_session(training_id, cancelled=True)
+        except Exception as e:
+            logger.exception(f"❌ XGBoost training failed: {e}")
+            with open(XGB_PROGRESS_FILE, "w") as f:
+                json.dump({"status": "error", **base, "message": str(e)}, f)
+            _update_training_session(training_id)
+        finally:
+            _remove_quietly(upload_path)
+
+    thread = threading.Thread(target=run_training, name="xgb-training")
+    _claim_training("xgb", thread)
+    thread.start()
+
+    return jsonify({"message": "🚀 XGBoost training started.", "training_id": training_id}), 202
 
 
 # Train the MLP Model in background thread
 @app.route('/train_MLP_model', methods=['POST'])
 def train_MLP_model():
+    """Starts MLP training in a background thread and returns immediately."""
     speed_mode = normalize_speed_mode(request.args.get("speed_mode") or request.form.get("speed_mode"))
     current_total_epochs = mlp_epochs_for_mode(speed_mode)
     requested_training_id = request.args.get("training_id") or request.form.get("training_id")
@@ -1671,68 +1808,61 @@ def train_MLP_model():
     training_id = session["training_id"]
     _update_training_session(training_id, speed_mode=speed_mode)
 
-    if os.path.exists("mlp_training_progress.json"):
-        with open("mlp_training_progress.json", "r") as f:
-            status = json.load(f).get("status", "not_started")
-        if status == "in_progress":
-            return jsonify({"message": "MLP training already in progress."}), 202
+    if _training_really_running("mlp"):
+        return jsonify({"message": "MLP training already in progress.", "training_id": training_id}), 202
 
-    # Mark training as started
-    with open("mlp_training_progress.json", "w") as f:
-        json.dump({"status": "in_progress", "current_epoch": 0, "total_epochs": current_total_epochs}, f)
+    base = {"current_epoch": 0, "total_epochs": current_total_epochs}
 
-    mlp_input_path = "from_db"
-    if 'file' in request.files:
-        try:
-            file = request.files['file']
-            df_raw = pd.read_csv(file)
-            df_raw.columns = df_raw.columns.str.lower().str.strip().str.replace(" ", "_")
-            if "product/model_#" in df_raw.columns:
-                df_raw.rename(columns={"product/model_#": "product_model"}, inplace=True)
-
-            for col in df_raw.columns:
-                if 'date' in col.lower():
-                    df_raw[col] = df_raw[col].apply(normalize_arabic_digits)
-                    df_raw[col] = pd.to_datetime(df_raw[col], errors="coerce")
-                    df_raw[col] = df_raw[col].dt.strftime('%Y-%m-%d %H:%M:%S')
-                    df_raw[col] = df_raw[col].replace({np.nan: None})
-
-            for col in ['promotion_email', 'register_email']:
-                if col in df_raw.columns:
-                    df_raw[col] = pd.to_numeric(df_raw[col], errors='coerce').fillna(0).astype(int)
-
+    # With an upload, the thread prepares it (or reuses the copy XGBoost already prepared).
+    # Without one, it trains from the devices table.
+    upload_path = None
+    filename = None
+    upload_size = None
+    prepared_path = None
+    file = request.files.get('file')
+    if file is not None:
+        filename = file.filename or "upload.csv"
+        file.seek(0, os.SEEK_END)
+        upload_size = file.tell()
+        file.seek(0)
+        prepared = _PREPARED_UPLOADS.get(training_id)
+        reuse_prepared = bool(
+            prepared and prepared[0] == filename and prepared[1] == upload_size
+            and os.path.exists(prepared[2])
+        )
+        if reuse_prepared:
+            prepared_path = prepared[2]
+        else:
             try:
-                insert_or_update_devices(df_raw, file.filename)
-            except Exception as db_error:
-                logger.warning(f"⚠️ DB update failed before MLP training: {db_error}")
+                upload_path = _save_upload(file, "mlp")
+            except Exception as e:
+                logger.error(f"❌ Could not save MLP training upload: {e}")
+                with open(MLP_PROGRESS_FILE, "w") as f:
+                    json.dump({"status": "error", **base, "message": str(e)}, f)
+                return jsonify({"error": str(e)}), 500
 
-            file.seek(0)
-            df = load_data(file, "train")
-            df.to_csv("processed_churn_data.csv", index=False)
-            mlp_input_path = "processed_churn_data.csv"
-            create_processed_features_table(df, overwrite=True)
-            insert_processed_features(df, upload_file=file.filename)
-            logger.info("Stored MLP training data in database.")
-        except Exception as e:
-            logger.error(f"❌ Unexpected error preparing MLP training data: {e}")
-            with open("mlp_training_progress.json", "w") as f:
-                json.dump({"status": "error", "current_epoch": 0, "total_epochs": current_total_epochs, "message": str(e)}, f)
-            return jsonify({"error": str(e)}), 500
-
+    with open(MLP_PROGRESS_FILE, "w") as f:
+        json.dump({"status": "in_progress", **base, "phase": "Queued"}, f)
 
     def run_training():
         try:
-            # Train the model with processed database data. 
             output_path = "processed_churn_data.csv"
-            if mlp_input_path == "from_db":
+            if file is None:
+                _write_prep_phase("mlp", training_id, base, "Processing features")
                 _run_subprocess_with_cancellation(
                     [sys.executable, "data_processing.py", "from_db", output_path, "train"],
                     training_id,
                     "mlp_data_processing",
                 )
+            elif upload_path is None:
+                # XGBoost already prepared this exact upload; reuse its processed copy.
+                _write_prep_phase("mlp", training_id, base, "Reusing processed features")
+                shutil.copyfile(prepared_path, output_path)
+            else:
+                _prepare_training_data(upload_path, filename, output_path, training_id, "mlp", base)
 
-            df = pd.read_csv(output_path)
-            if 'churn' not in df.columns:
+            header = pd.read_csv(output_path, nrows=0)
+            if 'churn' not in header.columns:
                 with open("mlp_training_progress.json", "w") as f:
                     json.dump({
                         "status": "error",
@@ -1744,6 +1874,7 @@ def train_MLP_model():
                 return
 
             logger.info("🚀 Starting MLP training process...")
+            _write_prep_phase("mlp", training_id, base, "Training MLP model")
             train_env = os.environ.copy()
             train_env["MLP_TOTAL_EPOCHS"] = str(current_total_epochs)
             # Fewer threads and malloc arenas keep the training process's memory down.
@@ -1788,7 +1919,7 @@ def train_MLP_model():
                 json.dump({"status": "cancelled", "current_epoch": 0, "total_epochs": current_total_epochs}, f)
             _update_training_session(training_id, cancelled=True)
         except Exception as e:
-            logger.error(f"❌ MLP training failed: {e}")
+            logger.exception(f"❌ MLP training failed: {e}")
             with open("mlp_training_progress.json", "w") as f:
                 json.dump({
                     "status": "error",
@@ -1797,9 +1928,12 @@ def train_MLP_model():
                     "message": str(e)
                 }, f)
             _update_training_session(training_id)
+        finally:
+            _remove_quietly(upload_path)
 
     # Initialize training status and start background thread
-    thread = threading.Thread(target=run_training)
+    thread = threading.Thread(target=run_training, name="mlp-training")
+    _claim_training("mlp", thread)
     thread.start()
     
     return jsonify({"message": "🚀 MLP training started.", "training_id": training_id}), 202
@@ -1809,8 +1943,7 @@ def train_MLP_model():
 @app.route('/training_status_XGB', methods=['GET'])
 def training_status_XGB():
     try:
-        with open("xgb_training_progress.json", "r") as f:
-            progress = json.load(f)
+        progress = _load_json_retry("xgb_training_progress.json")
         
         if progress.get("status") == "completed":
             with open("model_metrics.json", "r") as f:
@@ -1830,8 +1963,7 @@ def training_status_XGB():
 @app.route('/training_status_MLP', methods=['GET'])
 def training_status_MLP():
     try:
-        with open("mlp_training_progress.json", "r") as f:
-            progress = json.load(f)
+        progress = _load_json_retry("mlp_training_progress.json")
         
         if progress.get("status") == "completed":
             with open("MLP_metrics.json", "r") as f:
@@ -1902,8 +2034,7 @@ def get_config():
 @app.route('/training_progress_XGB', methods=['GET'])
 def training_progress_xgb():
     try:
-        with open("xgb_training_progress.json", "r") as f:
-            progress = json.load(f)
+        progress = _load_json_retry("xgb_training_progress.json")
         return jsonify(progress), 200
     except Exception:
         return jsonify({"current_trial": 0, "total_trials": 0}), 200
@@ -1913,8 +2044,7 @@ def training_progress_xgb():
 @app.route('/training_progress_MLP', methods=['GET'])
 def training_progress_mlp():
     try:
-        with open("mlp_training_progress.json", "r") as f:
-            progress = json.load(f)
+        progress = _load_json_retry("mlp_training_progress.json")
         return jsonify(progress), 200
     except Exception:
         return jsonify({"current_epoch": 0, "total_epochs": 0}), 200
@@ -2089,7 +2219,7 @@ def insert_dashboard_data(df, upload_file):
             {update_clause};
         """
 
-        execute_batch(cursor, insert_stmt, records)
+        execute_batch(cursor, insert_stmt, records, page_size=1000)
         conn.commit()
     except Exception:
         conn.rollback()
@@ -2263,13 +2393,23 @@ _dashboard_df_lock = threading.Lock()
 
 
 def _load_dashboard_df() -> pd.DataFrame:
-    """Cached SELECT * FROM dashboard_devices. Returns a copy so callers can mutate it."""
+    """Cached, column-normalized SELECT * FROM dashboard_devices.
+
+    Normalizing (aliasing and merging duplicate columns) happens once per refresh,
+    not once per endpoint. The returned frame shares data with the cache, so callers
+    may add or replace columns but must not edit values in place."""
     with _dashboard_df_lock:
         cached = _dashboard_df_cache["df"]
         if cached is None or time.monotonic() - _dashboard_df_cache["at"] > _DASHBOARD_DF_TTL_SECONDS:
-            cached = pd.read_sql("SELECT * FROM dashboard_devices", engine)
+            started = time.monotonic()
+            raw = pd.read_sql("SELECT * FROM dashboard_devices", engine)
+            cached = _normalize_dataframe_columns(raw)
+            del raw
+            _release_memory()
             _dashboard_df_cache.update(at=time.monotonic(), df=cached)
-        return cached.copy()
+            logger.info("dashboard_devices loaded: %d rows x %d cols in %.2fs",
+                        len(cached), len(cached.columns), time.monotonic() - started)
+        return cached.copy(deep=False)
 
 
 def _invalidate_dashboard_df() -> None:
@@ -2346,8 +2486,6 @@ def get_dashboard_data():
         # No data
         if df.empty:
             return jsonify(_empty_dashboard_metrics())
-
-        df = _normalize_dataframe_columns(df)
 
         # Return structure
         dashboard_metrics = {
@@ -2675,7 +2813,6 @@ def carrier_distribution():
         cursor.close()
         conn.close()
         df = _load_dashboard_df()
-        df = _normalize_dataframe_columns(df)
 
         # No data
         carrier_counts = {}
@@ -2776,7 +2913,6 @@ def return_analysis():
         cursor.close()
         conn.close()
         df = _load_dashboard_df()
-        df = _normalize_dataframe_columns(df)
 
         # No data
         if df.empty:
@@ -2839,7 +2975,6 @@ def time_analysis():
         cursor.close()
         conn.close()
         df = _load_dashboard_df()
-        df = _normalize_dataframe_columns(df)
 
         #No data
         if df.empty:

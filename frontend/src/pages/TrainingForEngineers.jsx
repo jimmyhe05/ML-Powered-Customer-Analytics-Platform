@@ -454,6 +454,9 @@ export default function TrainingForEngineers() {
 
             if (data.status === "in_progress") {
               setXGBTrainingStatus("in_progress");
+              setCurrentTrainingStage(
+                data.phase ? `${data.phase}...` : "Training in Progress..."
+              );
             }
 
             if (data.status === "completed") {
@@ -511,6 +514,9 @@ export default function TrainingForEngineers() {
 
             if (data.status === "in_progress") {
               setMlpTrainingStatus("in_progress");
+              setCurrentTrainingStage(
+                data.phase ? `${data.phase}...` : "Training in Progress..."
+              );
             }
 
             if (data.status === "completed") {
