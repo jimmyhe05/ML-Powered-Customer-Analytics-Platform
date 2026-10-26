@@ -35,4 +35,4 @@ RUN chmod +x /app/wait-for-postgres.sh
 # Start API directly; app reads DATABASE_URL/DB_* config at runtime.
 # Render's free tier has 512MB RAM; keep one worker by default because each
 # worker imports the ML stack.
-CMD ["sh", "-c", "gunicorn -w ${WEB_CONCURRENCY:-1} -t ${GUNICORN_TIMEOUT:-600} -b 0.0.0.0:${PORT:-5000} app:app"]
+CMD ["sh", "-c", "gunicorn -w ${WEB_CONCURRENCY:-1} --threads ${GUNICORN_THREADS:-4} -t ${GUNICORN_TIMEOUT:-600} -b 0.0.0.0:${PORT:-5000} app:app"]

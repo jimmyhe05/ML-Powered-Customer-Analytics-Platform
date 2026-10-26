@@ -433,13 +433,18 @@ if __name__ == "__main__":
     # Feature importance, computed here because this process already holds torch and
     # the data. It must finish before save() writes the success token.
     try:
-        sample = pd.concat([X_val, X_test], axis=0)
+        # Only the num__ columns the model was trained on. X_val/X_test also carry
+        # other columns, which breaks the first Linear layer (shape mismatch).
+        sample = pd.concat([X_val, X_test], axis=0)[numerical_cols]
         sample = sample.sample(min(100, len(sample)), random_state=42)
         model.compute_feature_importances(sample)
         with open("MLP_importance.json", "w") as f:
             json.dump({k: float(v) for k, v in model.feature_importances_.items()}, f)
     except Exception as e:
-        print(f"Could not compute feature importance: {e}")
+        # Log loudly: the Model drivers page is empty without this file.
+        import traceback
+        print(f"❌ Could not compute feature importance: {e}")
+        traceback.print_exc()
 
     # save result
     save(model, metrics)
