@@ -49,7 +49,7 @@ def _ensure_cors_headers(response):
     response.headers['Access-Control-Allow-Origin'] = response.headers.get(
         'Access-Control-Allow-Origin', '*')
     response.headers['Access-Control-Allow-Methods'] = response.headers.get(
-        'Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+        'Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS')
     response.headers['Access-Control-Allow-Headers'] = response.headers.get(
         'Access-Control-Allow-Headers', 'Content-Type,Authorization')
     return response
@@ -2122,6 +2122,7 @@ def upload_dashboard_data():
 
         # Insert data dynamically
         insert_dashboard_data(df, file.filename)
+        _invalidate_dashboard_df()
 
         logger.info(f"✅ Dashboard file {file.filename} uploaded and inserted.")
         return jsonify({"message": f"✅ Dashboard data uploaded successfully: {file.filename}"}), 200
@@ -2241,6 +2242,41 @@ def _first_existing_column(df: pd.DataFrame, candidates: List[str]) -> str | Non
     return None
 
 
+_CHURN_TRUE_VALUES = {"1", "1.0", "true", "yes", "y", "churn", "churned",
+                      "return", "returned", "repair", "repaired"}
+
+
+def _churn_flags(series: pd.Series) -> pd.Series:
+    """1 for churned rows, 0 otherwise. Mirrors the truthy values accepted by
+    data_processing.normalize_churn_values, so the dashboard counts the same rows
+    the models train on (a plain to_numeric would drop "yes"/"returned" labels)."""
+    text = series.astype(str).str.strip().str.lower()
+    numeric = pd.to_numeric(series, errors="coerce")
+    return (text.isin(_CHURN_TRUE_VALUES) | (numeric == 1)).astype(int)
+
+
+# The dashboard fires several endpoints at once and each used to run its own
+# SELECT * on dashboard_devices. One shared, short-lived copy removes that.
+_DASHBOARD_DF_TTL_SECONDS = 60
+_dashboard_df_cache: Dict[str, Any] = {"at": 0.0, "df": None}
+_dashboard_df_lock = threading.Lock()
+
+
+def _load_dashboard_df() -> pd.DataFrame:
+    """Cached SELECT * FROM dashboard_devices. Returns a copy so callers can mutate it."""
+    with _dashboard_df_lock:
+        cached = _dashboard_df_cache["df"]
+        if cached is None or time.monotonic() - _dashboard_df_cache["at"] > _DASHBOARD_DF_TTL_SECONDS:
+            cached = pd.read_sql("SELECT * FROM dashboard_devices", engine)
+            _dashboard_df_cache.update(at=time.monotonic(), df=cached)
+        return cached.copy()
+
+
+def _invalidate_dashboard_df() -> None:
+    with _dashboard_df_lock:
+        _dashboard_df_cache.update(at=0.0, df=None)
+
+
 def _clean_label_series(series: pd.Series) -> pd.Series:
     values = series.astype(str).str.strip()
     invalid_values = {"", "nan", "nat", "none", "null", "unknown"}
@@ -2305,7 +2341,7 @@ def get_dashboard_data():
 
         cursor.close()
         conn.close()
-        df = pd.read_sql("SELECT * FROM dashboard_devices", engine)
+        df = _load_dashboard_df()
 
         # No data
         if df.empty:
@@ -2324,10 +2360,15 @@ def get_dashboard_data():
         }
 
         ## ======== CHURN ANALYSIS ========
-        churn_date_col = _first_existing_column(df, ["activation_date", "office_date", "created_date", "created_at", "month"])
-        if churn_date_col and "churn" in df.columns:
+        churn_date_col = _first_existing_column(
+            df, ["activation_date", "active_date", "office_date", "created_date", "created_at", "month"])
+        if not churn_date_col or "churn" not in df.columns:
+            logger.info(
+                "Churn trend skipped: date column=%s, has churn column=%s, columns=%s",
+                churn_date_col, "churn" in df.columns, list(df.columns))
+        else:
             df[churn_date_col] = pd.to_datetime(df[churn_date_col], errors='coerce')
-            df['churn'] = pd.to_numeric(df['churn'], errors='coerce').fillna(0).astype(int)
+            df['churn'] = _churn_flags(df['churn'])
             df['churn_month'] = df[churn_date_col].dt.to_period("M").astype(str)
 
             churn_months = _clean_label_series(df[df['churn'] == 1]['churn_month'])
@@ -2465,6 +2506,7 @@ def reset_dashboard_data():
         # Drop the dashboard_devices table
         cur.execute("DROP TABLE IF EXISTS dashboard_devices CASCADE;")
         conn.commit()
+        _invalidate_dashboard_df()
 
         # Recreate dashboard_devices table
         cur.execute("""
@@ -2632,7 +2674,7 @@ def carrier_distribution():
 
         cursor.close()
         conn.close()
-        df = pd.read_sql("SELECT * FROM dashboard_devices", engine)
+        df = _load_dashboard_df()
         df = _normalize_dataframe_columns(df)
 
         # No data
@@ -2733,7 +2775,7 @@ def return_analysis():
             
         cursor.close()
         conn.close()
-        df = pd.read_sql("SELECT * FROM dashboard_devices", engine)
+        df = _load_dashboard_df()
         df = _normalize_dataframe_columns(df)
 
         # No data
@@ -2796,7 +2838,7 @@ def time_analysis():
 
         cursor.close()
         conn.close()
-        df = pd.read_sql("SELECT * FROM dashboard_devices", engine)
+        df = _load_dashboard_df()
         df = _normalize_dataframe_columns(df)
 
         #No data

@@ -17,7 +17,7 @@ const GRID_COLOR = "#f0f0f0";
 
 const ChurnCountsChart = ({ data }) => {
   // Format data for better visualization
-  const formattedData = data.map((item) => ({
+  const formattedData = (data ?? []).map((item) => ({
     ...item,
     month: item.month,
     churn_count: item.churn_count,
@@ -34,6 +34,15 @@ const ChurnCountsChart = ({ data }) => {
         </div>
       </Card.Header>
       <Card.Body className="p-4">
+        {formattedData.length === 0 ? (
+          <div className="text-center text-muted py-5">
+            <p className="mb-1">No churn events to plot yet.</p>
+            <small>
+              The uploaded dashboard file needs a churn column (1 = churned) and
+              a date column such as activation_date.
+            </small>
+          </div>
+        ) : (
         <ResponsiveContainer width="100%" height={400}>
           <LineChart
             data={formattedData}
@@ -90,6 +99,7 @@ const ChurnCountsChart = ({ data }) => {
             />
           </LineChart>
         </ResponsiveContainer>
+        )}
         <div className="mt-3 text-center">
           <small className="text-muted">
             Hover over data points to see the number of churned customers for

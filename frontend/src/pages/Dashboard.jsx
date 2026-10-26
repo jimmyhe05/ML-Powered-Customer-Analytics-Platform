@@ -101,37 +101,66 @@ const apiJson = async (url, options = {}, retryOptions = {}) => {
   return response.json();
 };
 
+// Last fetched dashboard payloads. Module scope outlives the component, so coming
+// back to this page renders the previous data immediately (stale-while-revalidate)
+// instead of showing the full-screen loader until every request finishes again.
+const dashboardCache = {};
+
 export default function Dashboard() {
   // Model type color scheme:
   // - XGBoost: primary (blue)
   // - MLP: success (green)
-  const [predictions, setPredictions] = useState([]);
+  const [predictions, setPredictions] = useState(dashboardCache.predictions ?? []);
   const [showModal, setShowModal] = useState(false);
   const [selectedFile, setSelectedFile] = useState(null);
   const [selectedModel, setSelectedModel] = useState("xgboost");
   const [dragging, setDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [dashboardData, setDashboardData] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [dashboardData, setDashboardData] = useState(dashboardCache.dashboardData ?? null);
+  const [loading, setLoading] = useState(!dashboardCache.dashboardData);
   const [page, setPage] = useState(0);
   const navigate = useNavigate();
-  const [featureImportance, setFeatureImportance] = useState([]);
+  const [featureImportance, setFeatureImportance] = useState(dashboardCache.featureImportance ?? []);
   const [riskThreshold] = useState(() => {
     const stored = localStorage.getItem("riskThreshold");
     return stored ? parseInt(stored) : 50;
   });
-  const [carrierData, setCarrierData] = useState([]);
-  const [returnData, setReturnData] = useState(emptyReturnAnalysis);
-  const [usageData, setUsageData] = useState(null);
-  const [correlationData, setCorrelationData] = useState(null);
-  const [mlpFeatureImportance, setMlpFeatureImportance] = useState([]);
+  const [carrierData, setCarrierData] = useState(dashboardCache.carrierData ?? []);
+  const [returnData, setReturnData] = useState(dashboardCache.returnData ?? emptyReturnAnalysis);
+  const [usageData, setUsageData] = useState(dashboardCache.usageData ?? null);
+  const [correlationData, setCorrelationData] = useState(dashboardCache.correlationData ?? null);
+  const [mlpFeatureImportance, setMlpFeatureImportance] = useState(dashboardCache.mlpFeatureImportance ?? []);
   const [error, setError] = useState(null);
   const dashboardTitleRef = useRef(null);
   const [modelTrained, setModelTrained] = useState(false);
-  const [modelAvailability, setModelAvailability] = useState({
-    xgboost: false,
-    mlp: false,
-  });
+  const [modelAvailability, setModelAvailability] = useState(
+    dashboardCache.modelAvailability ?? { xgboost: false, mlp: false }
+  );
+
+  // Write-through: keep the cache in step with whatever the page last showed.
+  useEffect(() => {
+    Object.assign(dashboardCache, {
+      predictions,
+      dashboardData,
+      featureImportance,
+      mlpFeatureImportance,
+      carrierData,
+      returnData,
+      usageData,
+      correlationData,
+      modelAvailability,
+    });
+  }, [
+    predictions,
+    dashboardData,
+    featureImportance,
+    mlpFeatureImportance,
+    carrierData,
+    returnData,
+    usageData,
+    correlationData,
+    modelAvailability,
+  ]);
   const [allPredictions, setAllPredictions] = useState([]);
   const [isLoadingAllPredictions, setIsLoadingAllPredictions] = useState(false);
   const [showAllPredictionsModal, setShowAllPredictionsModal] = useState(false);
@@ -344,7 +373,10 @@ export default function Dashboard() {
       })
       .catch((error) => {
         console.error("Error fetching data:", error);
-        setError(error.message || "Failed to load dashboard data");
+        // Keep showing cached data if a background refresh fails.
+        if (!dashboardCache.dashboardData) {
+          setError(error.message || "Failed to load dashboard data");
+        }
         setLoading(false);
       });
 
@@ -810,7 +842,11 @@ export default function Dashboard() {
                     />
                   ) : (
                     <div className="text-center py-4">
-                      <p className="text-muted">No MLP model available</p>
+                      <p className="text-muted">
+                        {modelAvailability.mlp
+                          ? "MLP is trained but has no feature importance saved. Retrain the MLP to generate it."
+                          : "No MLP model available"}
+                      </p>
                     </div>
                   )}
                 </Card.Body>
